@@ -1,0 +1,5 @@
+{
+  "name": "Kiara - Your Sassy AI",
+  "description": "A real-time, voice-to-voice AI assistant with a sassy personality.",
+  "requestFramePermissions": ["microphone"]
+}

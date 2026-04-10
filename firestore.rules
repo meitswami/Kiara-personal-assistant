@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: memories
+    // Document ID: auto-generated
+    // Fields:
+    //   - type: string (meeting, idea, task, note)
+    //   - content: string (required)
+    //   - embedding: list of numbers (optional)
+    //   - entities: map (optional)
+    //   - actionItems: list of strings (optional)
+    //   - priority: string (low, medium, high)
+    //   - createdAt: timestamp (required)
+    //   - userId: string (required, immutable)
+    //
+    // Collection: tasks
+    // Document ID: auto-generated
+    // Fields:
+    //   - title: string (required)
+    //   - priority: string (low, medium, high)
+    //   - dueDate: timestamp (optional)
+    //   - description: string (optional)
+    //   - status: string (pending, completed)
+    //   - createdAt: timestamp (required)
+    //   - userId: string (required, immutable)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "meit2swami@gmail.com" && request.auth.token.email_verified == true));
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    function isSharedWithMe(resourceId, type) {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/shared/$(request.auth.uid + '_' + resourceId)) ||
+        exists(/databases/$(database)/documents/shared/$( 'group_all_' + resourceId));
+    }
+    
+    function userIdUnchanged() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid;
+    }
+    
+    function userIdNotModified() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == resource.data.userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidUser(data) {
+      return data.firstName is string && data.firstName.size() > 0 &&
+             data.lastName is string && data.lastName.size() > 0 &&
+             data.email is string && data.email.size() > 0 &&
+             data.role in ['admin', 'user'];
+    }
+
+    function isValidMemory(data) {
+      return data.type in ['meeting', 'idea', 'task', 'note'] &&
+             data.content is string && data.content.size() > 0 && data.content.size() < 10000 &&
+             data.priority in ['low', 'medium', 'high'] &&
+             data.userId == request.auth.uid;
+    }
+
+    function isValidTask(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.priority in ['low', 'medium', 'high'] &&
+             data.status in ['pending', 'completed'] &&
+             data.userId == request.auth.uid;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && 
+                      (request.resource.data.role == 'user' || isAdmin());
+      allow update: if (isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /memories/{memoryId} {
+      allow read: if isDocOwner() || isAdmin() || isSharedWithMe(memoryId, 'memory');
+      allow create: if isAuthenticated() && isValidMemory(request.resource.data) && userIdUnchanged();
+      allow update: if isDocOwner() && isValidMemory(request.resource.data) && userIdNotModified();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isDocOwner() || isAdmin() || isSharedWithMe(taskId, 'task');
+      allow create: if isAuthenticated() && isValidTask(request.resource.data) && userIdUnchanged();
+      allow update: if isDocOwner() && isValidTask(request.resource.data) && userIdNotModified();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /shared/{shareId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

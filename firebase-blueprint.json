@@ -1,0 +1,81 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information.",
+      "type": "object",
+      "properties": {
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "whatsapp": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "profile": { "type": "object", "description": "Detailed profile like location, skillset, etc." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["firstName", "lastName", "email", "role", "createdAt"]
+    },
+    "Memory": {
+      "title": "Memory",
+      "description": "A stored insight or conversation summary.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["meeting", "idea", "task", "note"] },
+        "content": { "type": "string" },
+        "embedding": { "type": "array", "items": { "type": "number" } },
+        "entities": { "type": "object" },
+        "actionItems": { "type": "array", "items": { "type": "string" } },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" }
+      },
+      "required": ["type", "content", "createdAt", "userId"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "An actionable item generated from a conversation.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" }
+      },
+      "required": ["title", "priority", "status", "createdAt", "userId"]
+    },
+    "SharedResource": {
+      "title": "SharedResource",
+      "description": "Tracks shared access to memories, tasks, or ideas.",
+      "type": "object",
+      "properties": {
+        "resourceId": { "type": "string" },
+        "resourceType": { "type": "string", "enum": ["memory", "task", "idea"] },
+        "sharedWith": { "type": "string", "description": "User ID or 'group_all'" },
+        "sharedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["resourceId", "resourceType", "sharedWith", "sharedBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and roles."
+    },
+    "/memories/{memoryId}": {
+      "schema": "Memory",
+      "description": "Collection of user memories and conversation analyses."
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Collection of tasks generated for the user."
+    },
+    "/shared/{shareId}": {
+      "schema": "SharedResource",
+      "description": "Permissions for shared content."
+    }
+  }
+}
