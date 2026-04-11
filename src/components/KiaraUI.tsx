@@ -5,8 +5,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, MicOff, Power, Globe, Zap, Heart, Sparkles, Shield, X, Send, MessageSquare, Coins, Settings, Bell, Smartphone, Volume2 } from 'lucide-react';
+import { Mic, MicOff, Power, Globe, Zap, Heart, Sparkles, Shield, X, Send, MessageSquare, Coins, Settings, Bell, Smartphone, Volume2, ChevronDown } from 'lucide-react';
 import { AudioStreamer } from '../lib/audio-streamer';
+import { VideoStreamer } from '../lib/video-streamer';
 import { LiveSession, SessionState } from '../lib/live-session';
 import { AIService } from '../services/ai-service';
 import { auth, signInWithGoogle } from '../lib/firebase';
@@ -15,25 +16,50 @@ import { RegistrationForm } from './RegistrationForm';
 import { LoginForm } from './LoginForm';
 import { AdminPanel } from './AdminPanel';
 import { Avatar } from './Avatar';
-import { doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { assistantCore } from '../lib/assistant-core';
 
+interface Message {
+  id: string;
+  text: string;
+  sender: 'user' | 'kiara';
+  timestamp: Date;
+}
+
 export const KiaraUI: React.FC = () => {
   const [state, setState] = useState<SessionState>("disconnected");
+  const stateRef = useRef<SessionState>("disconnected");
+
+  // Update ref whenever state changes
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
   const [isPowerOn, setIsPowerOn] = useState(false);
-  const [lastTranscript, setLastTranscript] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+
+  const addLog = (msg: string) => {
+    console.log(`[Kiara Debug] ${msg}`);
+    setDebugLogs(prev => [...prev.slice(-4), msg]);
+  };
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'none'>('none');
   const [showAdmin, setShowAdmin] = useState(false);
+  const [incomingCall, setIncomingCall] = useState<{ phone: string; transcript: string } | null>(null);
+  const [analyzingCall, setAnalyzingCall] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
+  const [memories, setMemories] = useState<any[]>([]);
+  const [reminders, setReminders] = useState<any[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [showChat, setShowChat] = useState(false);
   const [tokens, setTokens] = useState({ used: 1240, total: 50000 }); // Mock token data
   const [insights, setInsights] = useState<any[]>([]);
   const [showInsights, setShowInsights] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [isVisionOn, setIsVisionOn] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [settings, setSettings] = useState({
     wakeWord: false,
@@ -42,6 +68,7 @@ export const KiaraUI: React.FC = () => {
   });
   
   const audioStreamerRef = useRef<AudioStreamer | null>(null);
+  const videoStreamerRef = useRef<VideoStreamer | null>(null);
   const liveSessionRef = useRef<LiveSession | null>(null);
   const recognitionRef = useRef<any>(null);
 
@@ -80,10 +107,37 @@ export const KiaraUI: React.FC = () => {
           setUserProfile(docSnap.data());
         }
         AIService.testConnection();
+
+        // Listen for memories
+        const memoriesQuery = query(
+          collection(db, 'memories'),
+          where('userId', '==', u.uid),
+          orderBy('createdAt', 'desc'),
+          limit(20)
+        );
+        const unsubMemories = onSnapshot(memoriesQuery, (snapshot) => {
+          setMemories(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+
+        // Listen for reminders
+        const remindersQuery = query(
+          collection(db, 'reminders'),
+          where('userId', '==', u.uid),
+          orderBy('dueDate', 'asc')
+        );
+        const unsubReminders = onSnapshot(remindersQuery, (snapshot) => {
+          setReminders(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+
         setAuthMode('none');
         
         // Initial ERP Sync
         assistantCore.syncWithERP();
+
+        return () => {
+          unsubMemories();
+          unsubReminders();
+        };
       } else {
         setUserProfile(null);
       }
@@ -91,6 +145,7 @@ export const KiaraUI: React.FC = () => {
     });
 
     audioStreamerRef.current = assistantCore.audioEngine;
+    videoStreamerRef.current = new VideoStreamer();
     
     const handleSummarize = async (e: any) => {
       const { transcript } = e.detail;
@@ -123,9 +178,22 @@ export const KiaraUI: React.FC = () => {
       }
     };
 
+    const handleMemorize = async (e: any) => {
+      const { text } = e.detail;
+      addLog("Kiara is memorizing this for you...");
+      try {
+        await AIService.memorizeStructured(text);
+        addLog("Memory stored successfully in JSON and Database.");
+      } catch (err) {
+        console.error("Memorization failed:", err);
+        addLog("Failed to memorize. Please try again.");
+      }
+    };
+
     window.addEventListener("kiara-summarize", handleSummarize);
     window.addEventListener("kiara-create-tasks", handleCreateTasks);
     window.addEventListener("kiara-search-memory", handleSearchMemory);
+    window.addEventListener("kiara-memorize", handleMemorize);
 
     return () => {
       handleDisconnect();
@@ -133,6 +201,7 @@ export const KiaraUI: React.FC = () => {
       window.removeEventListener("kiara-summarize", handleSummarize);
       window.removeEventListener("kiara-create-tasks", handleCreateTasks);
       window.removeEventListener("kiara-search-memory", handleSearchMemory);
+      window.removeEventListener("kiara-memorize", handleMemorize);
     };
   }, []);
 
@@ -163,64 +232,138 @@ export const KiaraUI: React.FC = () => {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      alert("Gemini API Key is missing. Please check your environment variables.");
+    addLog(`Starting connection (Online: ${navigator.onLine})...`);
+    
+    // Check for both undefined and the literal string "undefined" (common Vite build issue)
+    if (!apiKey || apiKey === "undefined" || apiKey === "") {
+      addLog("ERROR: API Key is missing or invalid in build");
+      alert("Kiara's brain (API Key) is missing! Please ensure GEMINI_API_KEY is set in the environment and rebuild the app.");
       return;
     }
+
+    addLog(`API Key detected (starts with: ${apiKey.substring(0, 4)}...)`);
 
     try {
       // Stop wake word recognition before starting full recording
       if (recognitionRef.current) {
+        addLog("Stopping wake word listener...");
         try {
           recognitionRef.current.stop();
-          // Give the browser/OS a moment to release the microphone hardware
           await new Promise(resolve => setTimeout(resolve, 500));
         } catch (e) {
-          // Ignore if already stopped
+          addLog("Wake word stop warning: " + e);
         }
       }
 
+      addLog("Initializing Live Session...");
       liveSessionRef.current = await assistantCore.initializeLiveSession(apiKey);
+      
+      addLog("Connecting to Intelligence Engine...");
       await liveSessionRef.current.connect({
-        onStateChange: (newState) => setState(newState),
+        addLog,
+        onStateChange: (newState) => {
+          addLog(`State changed to: ${newState}`);
+          setState(newState);
+          if (newState === "disconnected") {
+            setIsPowerOn(false);
+          }
+        },
         onAudioData: (base64) => {
           audioStreamerRef.current?.playAudioChunk(base64);
-          // Simulate audio level for lip sync
           setAudioLevel(Math.random() * 0.5 + 0.5);
         },
         onInterrupted: () => {
+          addLog("Interrupted by user");
           audioStreamerRef.current?.stopPlayback();
           setAudioLevel(0);
         },
         onTranscription: (text, isModel) => {
-          if (!isModel) setLastTranscript(text);
-          if (isModel) setAudioLevel(0.2); // Small movement for model turn
+          if (isModel) setAudioLevel(0.2);
           
-          // Update mock tokens on interaction
+          setMessages(prev => {
+            const lastMsg = prev[prev.length - 1];
+            const sender = isModel ? 'kiara' : 'user';
+            
+            // If the last message is from the same sender and was within the last 2 seconds, update it
+            // This handles the streaming nature of transcriptions
+            if (lastMsg && lastMsg.sender === sender && (new Date().getTime() - lastMsg.timestamp.getTime() < 2000)) {
+              const newMessages = [...prev];
+              newMessages[newMessages.length - 1] = {
+                ...lastMsg,
+                text: text,
+                timestamp: new Date()
+              };
+              return newMessages;
+            }
+            
+            return [...prev, {
+              id: Math.random().toString(36).substring(7),
+              text,
+              sender,
+              timestamp: new Date()
+            }];
+          });
+
           if (userProfile?.role === 'admin') {
             setTokens(prev => ({ ...prev, used: prev.used + Math.floor(text.length / 4) }));
           }
         },
         onError: (err) => {
-          console.error(err);
+          const errMsg = err.message || JSON.stringify(err);
+          addLog(`API ERROR: ${errMsg}`);
+          console.error("Live API Error:", err);
           setIsPowerOn(false);
+          alert(`Kiara Connection Error: ${errMsg}`);
+        }
+      }, {
+        gender: userProfile?.gender,
+        personality: userProfile?.aiPersonality,
+        userName: userProfile?.firstName
+      });
+
+      addLog("Starting Microphone...");
+      try {
+        const permissionStatus = await navigator.permissions.query({ name: 'microphone' as any });
+        addLog(`Mic Permission: ${permissionStatus.state}`);
+      } catch (e) {
+        addLog("Permission check skipped (not supported)");
+      }
+      
+      await audioStreamerRef.current?.startRecording((base64) => {
+        if (liveSessionRef.current) {
+          liveSessionRef.current.sendAudio(base64);
         }
       });
 
-      await audioStreamerRef.current?.startRecording((base64) => {
-        liveSessionRef.current?.sendAudio(base64);
-      });
+      if (isVisionOn) {
+        addLog("Starting Vision...");
+        await videoStreamerRef.current?.start((base64) => {
+          if (liveSessionRef.current) {
+            liveSessionRef.current.sendVideo(base64);
+          }
+        });
+      }
 
+      // Final check if we are still connected before going live
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (stateRef.current === "disconnected") {
+        throw new Error("Connection lost during initialization");
+      }
+
+      addLog("System Live!");
       setIsPowerOn(true);
     } catch (error: any) {
+      const errMsg = error.message || "Unknown connection error";
+      addLog(`CRITICAL ERROR: ${errMsg}`);
       console.error("Failed to connect:", error);
       setIsPowerOn(false);
-      alert(error.message || "Failed to connect to Kiara. Please check your microphone and internet connection.");
+      alert(`Failed to connect to Kiara: ${errMsg}\n\nPlease check your microphone and internet connection.`);
     }
   };
 
   const handleDisconnect = () => {
     audioStreamerRef.current?.stopRecording();
+    videoStreamerRef.current?.stop();
     audioStreamerRef.current?.stopPlayback();
     liveSessionRef.current?.disconnect();
     setIsPowerOn(false);
@@ -237,10 +380,20 @@ export const KiaraUI: React.FC = () => {
 
   const handleSendMessage = () => {
     if (!chatInput.trim() || !liveSessionRef.current) return;
-    liveSessionRef.current.sendText(chatInput);
+    
+    const text = chatInput.trim();
+    liveSessionRef.current.sendText(text);
+    
+    setMessages(prev => [...prev, {
+      id: Math.random().toString(36).substring(7),
+      text,
+      sender: 'user',
+      timestamp: new Date()
+    }]);
+    
     setChatInput("");
     if (userProfile?.role === 'admin') {
-      setTokens(prev => ({ ...prev, used: prev.used + Math.floor(chatInput.length / 4) }));
+      setTokens(prev => ({ ...prev, used: prev.used + Math.floor(text.length / 4) }));
     }
   };
 
@@ -276,6 +429,69 @@ export const KiaraUI: React.FC = () => {
 
   return (
     <div className="fixed inset-0 bg-[#050505] text-white flex flex-col items-center justify-between p-8 font-sans overflow-hidden">
+      {/* Call Notification Simulation */}
+      <AnimatePresence>
+        {incomingCall && (
+          <motion.div
+            initial={{ opacity: 0, y: -100, scale: 0.9 }}
+            animate={{ opacity: 1, y: 20, scale: 1 }}
+            exit={{ opacity: 0, y: -100, scale: 0.9 }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-full max-w-sm bg-black/80 backdrop-blur-2xl border border-white/20 rounded-3xl p-6 shadow-2xl"
+          >
+            <div className="flex items-center gap-4 mb-4">
+              <div className="w-12 h-12 rounded-full bg-pink-500 flex items-center justify-center animate-pulse">
+                <Smartphone className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold">Call Ended</h3>
+                <p className="text-sm text-gray-400">{incomingCall.phone}</p>
+              </div>
+            </div>
+            <p className="text-sm text-gray-300 mb-6 italic">
+              "Kiara detected a call recording. Should I analyze it for tasks and reminders?"
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  setAnalyzingCall(true);
+                  try {
+                    await AIService.analyzeCall(incomingCall.phone, incomingCall.transcript);
+                    addLog("Call analyzed. Reminders added to your calendar.");
+                  } catch (err) {
+                    console.error("Call analysis failed:", err);
+                  } finally {
+                    setAnalyzingCall(false);
+                    setIncomingCall(null);
+                  }
+                }}
+                disabled={analyzingCall}
+                className="flex-1 bg-pink-500 hover:bg-pink-600 text-white font-bold py-3 rounded-2xl transition-all disabled:opacity-50"
+              >
+                {analyzingCall ? "Analyzing..." : "Yes, Analyze"}
+              </button>
+              <button
+                onClick={() => setIncomingCall(null)}
+                className="flex-1 bg-white/10 hover:bg-white/20 text-white font-bold py-3 rounded-2xl transition-all"
+              >
+                Dismiss
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {/* Debug Overlay */}
+      {debugLogs.length > 0 && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] w-full max-w-xs pointer-events-none">
+          <div className="bg-black/80 backdrop-blur-md border border-white/10 rounded-xl p-3 space-y-1">
+            <div className="text-[8px] uppercase tracking-widest text-gray-500 mb-1">Debug Logs</div>
+            {debugLogs.map((log, i) => (
+              <div key={i} className="text-[10px] font-mono text-blue-400 truncate">
+                {`> ${log}`}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Background Atmosphere */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-pink-500/10 rounded-full blur-[120px]" />
@@ -299,10 +515,25 @@ export const KiaraUI: React.FC = () => {
               </div>
             )}
           </div>
-          <h1 className="text-4xl font-bold tracking-tighter flex items-center justify-center gap-2">
-            KIARA <Sparkles className="text-pink-500 w-6 h-6" />
+          <h1 className="text-2xl font-bold tracking-tighter flex items-center justify-center gap-2">
+            KIARA <Sparkles className="text-pink-500 w-5 h-5" />
           </h1>
-          {user ? (
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => setShowMemory(!showMemory)}
+              className={`p-2 rounded-lg transition-all duration-300 ${showMemory ? 'bg-pink-500/20 text-pink-400 shadow-[0_0_15px_rgba(236,72,153,0.3)]' : 'bg-white/5 text-gray-400 hover:bg-white/10'}`}
+              title="Memory & Calendar"
+            >
+              <MessageSquare className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={() => setIsVisionOn(!isVisionOn)}
+              className={`p-2 rounded-lg transition-all duration-300 ${isVisionOn ? 'bg-blue-500/20 text-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.3)]' : 'bg-white/5 text-gray-400 hover:bg-white/10'}`}
+              title={isVisionOn ? "Vision Enabled" : "Enable Vision"}
+            >
+              <Smartphone className={`w-4 h-4 ${isVisionOn ? 'animate-pulse' : ''}`} />
+            </button>
+            {user ? (
             <div className="flex items-center gap-3">
               <button 
                 onClick={() => setShowSettings(true)}
@@ -346,6 +577,7 @@ export const KiaraUI: React.FC = () => {
             </button>
           )}
         </div>
+      </div>
         <p className="text-xs uppercase tracking-[0.3em] text-gray-500 mt-1">Personal Intelligence System</p>
       </motion.div>
 
@@ -465,6 +697,42 @@ export const KiaraUI: React.FC = () => {
                     />
                   </button>
                 </div>
+
+                {/* Personality Selection */}
+                <div className="space-y-3 pt-4 border-t border-white/5">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-pink-500/10">
+                      <Heart className="w-5 h-5 text-pink-500" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold">AI Personality</h3>
+                      <p className="text-[10px] text-gray-500">Choose how Kiara speaks to you</p>
+                    </div>
+                  </div>
+                  <div className="relative">
+                    <select
+                      value={userProfile?.aiPersonality || 'sassy'}
+                      onChange={async (e) => {
+                        const p = e.target.value;
+                        if (user) {
+                          await updateDoc(doc(db, 'users', user.uid), { aiPersonality: p });
+                          setUserProfile((prev: any) => ({ ...prev, aiPersonality: p }));
+                          addLog(`Personality changed to ${p}. Restart session to apply.`);
+                        }
+                      }}
+                      className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-4 text-sm text-white focus:outline-none focus:border-pink-500/50 transition-colors appearance-none cursor-pointer"
+                    >
+                      <option value="sassy" className="bg-[#111]">Sassy (Default)</option>
+                      <option value="romantic" className="bg-[#111]">Romantic</option>
+                      <option value="cool" className="bg-[#111]">Cool</option>
+                      <option value="professional" className="bg-[#111]">Professional</option>
+                      <option value="normal" className="bg-[#111]">Normal</option>
+                    </select>
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                      <ChevronDown className="w-4 h-4" />
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="p-6 bg-white/[0.02] border-t border-white/10">
@@ -526,37 +794,73 @@ export const KiaraUI: React.FC = () => {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="w-full bg-white/5 border border-white/10 rounded-3xl p-4 flex flex-col gap-4"
+              className="w-full bg-[#0b141a] border border-white/10 rounded-3xl p-0 flex flex-col overflow-hidden relative"
             >
-              <div className="flex-1 min-h-[200px] max-h-[300px] overflow-y-auto p-2 text-sm text-gray-300">
-                {lastTranscript && (
-                  <div className="bg-white/5 p-3 rounded-2xl border border-white/5 mb-2">
-                    {lastTranscript}
+              {/* WhatsApp Background Pattern */}
+              <div className="absolute inset-0 chat-bg pointer-events-none" />
+              
+              <div className="flex-1 min-h-[350px] max-h-[450px] overflow-y-auto p-4 flex flex-col gap-2 scrollbar-hide relative z-10">
+                {messages.length > 0 ? (
+                  messages.map((msg) => (
+                    <div 
+                      key={msg.id}
+                      className={`flex flex-col max-w-[85%] ${msg.sender === 'user' ? 'self-end items-end' : 'self-start items-start'}`}
+                    >
+                      <div className={`px-3 py-1.5 rounded-xl relative shadow-sm ${
+                        msg.sender === 'user' 
+                          ? 'bg-[#005c4b] text-[#e9edef] rounded-tr-none' 
+                          : 'bg-[#202c33] text-[#e9edef] rounded-tl-none'
+                      }`}>
+                        <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                        <div className="flex justify-end items-center gap-1 mt-0.5">
+                          <span className="text-[9px] text-gray-400">
+                            {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                          {msg.sender === 'user' && (
+                            <div className="flex -space-x-0.5">
+                              <Zap className="w-2.5 h-2.5 text-blue-400" />
+                              <Zap className="w-2.5 h-2.5 text-blue-400" />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full opacity-30">
+                    <MessageSquare className="w-12 h-12 mb-2 text-gray-400" />
+                    <p className="text-[10px] uppercase tracking-widest text-gray-400">No messages yet, darling</p>
                   </div>
                 )}
-                <p className="text-[10px] uppercase tracking-widest text-gray-500 text-center mt-4">
-                  Type your long message below
-                </p>
+                <div ref={(el) => el?.scrollIntoView({ behavior: 'smooth' })} />
               </div>
-              <div className="relative">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Tell me everything, darling..."
-                  className="w-full bg-black/40 border border-white/10 rounded-2xl py-3 pl-4 pr-12 text-sm focus:outline-none focus:border-pink-500/50 transition-colors resize-none h-24"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                />
-                <button 
-                  onClick={handleSendMessage}
-                  className="absolute right-3 bottom-3 p-2 bg-pink-500 rounded-xl hover:bg-pink-600 transition-colors"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
+              
+              <div className="p-3 bg-[#202c33]/50 backdrop-blur-md relative z-10">
+                <div className="relative flex items-end gap-2">
+                  <textarea
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Type a message..."
+                    className="flex-1 bg-[#2a3942] border-none rounded-xl py-2.5 px-4 text-sm text-[#e9edef] placeholder:text-gray-500 focus:ring-0 transition-colors resize-none h-11 max-h-32 scrollbar-hide"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
+                  />
+                  <button 
+                    onClick={handleSendMessage}
+                    disabled={!chatInput.trim()}
+                    className={`p-2.5 rounded-full transition-all ${
+                      chatInput.trim() 
+                        ? 'bg-[#00a884] text-white scale-100' 
+                        : 'bg-gray-600 text-gray-400 scale-90 opacity-50'
+                    }`}
+                  >
+                    <Send className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
             </motion.div>
           ) : (
@@ -709,6 +1013,125 @@ export const KiaraUI: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Memory & Calendar Modal */}
+      <AnimatePresence>
+        {showMemory && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          >
+            <div className="bg-[#0a0a0a] border border-white/10 w-full max-w-4xl max-h-[80vh] rounded-3xl overflow-hidden flex flex-col shadow-2xl">
+              <div className="p-6 border-b border-white/10 flex items-center justify-between bg-white/[0.02]">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-pink-500/20">
+                    <Zap className="w-5 h-5 text-pink-500" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold tracking-tight">Intelligence Hub</h2>
+                    <p className="text-xs text-gray-500">Structured Memories & Calendar Events</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowMemory(false)}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                {/* Reminders / Calendar */}
+                <section>
+                  <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <Bell className="w-4 h-4" /> Upcoming Alerts
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {reminders.length === 0 ? (
+                      <p className="text-sm text-gray-600 italic">No upcoming reminders.</p>
+                    ) : (
+                      reminders.map((r) => (
+                        <div key={r.id} className="bg-white/5 border border-white/10 p-4 rounded-2xl flex items-start gap-4">
+                          <div className={`mt-1 w-2 h-2 rounded-full ${r.status === 'pending' ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'}`} />
+                          <div className="flex-1">
+                            <h4 className="text-sm font-bold">{r.title}</h4>
+                            <p className="text-xs text-gray-400 mt-1">{r.description}</p>
+                            <div className="flex items-center gap-2 mt-3 text-[10px] text-pink-500 font-mono">
+                              <Settings className="w-3 h-3" />
+                              {new Date(r.dueDate).toLocaleString()}
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </section>
+
+                {/* Structured Memories Knowledge Base */}
+                <section>
+                  <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <Heart className="w-4 h-4" /> Knowledge Base
+                  </h3>
+                  <div className="overflow-x-auto rounded-2xl border border-white/10">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-white/5 text-gray-400 text-[10px] uppercase tracking-wider">
+                        <tr>
+                          <th className="px-4 py-3 font-medium">Type</th>
+                          <th className="px-4 py-3 font-medium">Content</th>
+                          <th className="px-4 py-3 font-medium">Structured Data</th>
+                          <th className="px-4 py-3 font-medium">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {memories.map((m) => (
+                          <tr key={m.id} className="hover:bg-white/[0.02] transition-colors">
+                            <td className="px-4 py-4">
+                              <span className="px-2 py-1 rounded-md bg-pink-500/10 text-pink-500 text-[10px] font-bold uppercase">
+                                {m.type}
+                              </span>
+                            </td>
+                            <td className="px-4 py-4 text-gray-300 max-w-xs truncate">
+                              {m.content}
+                            </td>
+                            <td className="px-4 py-4">
+                              <pre className="text-[10px] font-mono text-blue-400 bg-black/40 p-2 rounded-lg max-h-24 overflow-y-auto">
+                                {JSON.stringify(m.structuredData, null, 2)}
+                              </pre>
+                            </td>
+                            <td className="px-4 py-4 text-[10px] text-gray-500 font-mono">
+                              {m.createdAt?.toDate ? m.createdAt.toDate().toLocaleDateString() : 'Recent'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+              
+              <div className="p-6 bg-white/[0.02] border-t border-white/10 flex justify-between items-center">
+                <button 
+                  onClick={() => {
+                    setIncomingCall({
+                      phone: "+91 98765 43210",
+                      transcript: "Hey, let's meet tomorrow at 5 PM to discuss the portfolio. Also, remind me to call the client on Monday morning."
+                    });
+                    setShowMemory(false);
+                  }}
+                  className="text-[10px] text-pink-500 hover:underline flex items-center gap-1"
+                >
+                  <Smartphone className="w-3 h-3" /> Simulate Incoming Call
+                </button>
+                <p className="text-[10px] text-gray-500">
+                  KIARA - Personal Assistant Intelligent System v2.1
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

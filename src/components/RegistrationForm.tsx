@@ -20,6 +20,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({ onSuccess, o
     lastName: '',
     whatsapp: '',
     email: '',
+    gender: 'male',
     password: '',
     confirmPassword: ''
   });
@@ -47,6 +48,8 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({ onSuccess, o
         lastName: formData.lastName,
         whatsapp: formData.whatsapp,
         email: formData.email,
+        gender: formData.gender,
+        aiPersonality: 'sassy', // Default personality
         role: role,
         createdAt: serverTimestamp()
       });
@@ -120,6 +123,23 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({ onSuccess, o
             value={formData.email}
             onChange={(e) => setFormData({ ...formData, email: e.target.value })}
           />
+        </div>
+
+        <div className="grid grid-cols-3 gap-2">
+          {['male', 'female', 'other'].map((g) => (
+            <button
+              key={g}
+              type="button"
+              onClick={() => setFormData({ ...formData, gender: g })}
+              className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+                formData.gender === g 
+                  ? 'bg-pink-500 border-pink-500 text-white' 
+                  : 'bg-white/5 border-white/10 text-gray-400 hover:bg-white/10'
+              }`}
+            >
+              {g.charAt(0).toUpperCase() + g.slice(1)}
+            </button>
+          ))}
         </div>
 
         <div className="relative">

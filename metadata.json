@@ -1,5 +1,5 @@
 {
-  "name": "Kiara - Your Sassy AI",
-  "description": "A real-time, voice-to-voice AI assistant with a sassy personality.",
-  "requestFramePermissions": ["microphone"]
+  "name": "KIARA - Personal Assistant Intelligent System",
+  "description": "A high-performance, private personal assistant with structured memory, call analysis, and real-time voice interaction.",
+  "requestFramePermissions": ["microphone", "camera"]
 }

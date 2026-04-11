@@ -39,7 +39,11 @@ export interface MemoryItem {
 }
 
 export class AIService {
-  private static ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+  private static ai = new GoogleGenAI({ 
+    apiKey: process.env.GEMINI_API_KEY!,
+    // Use any cast to avoid lint errors with custom baseUrl
+    ...(process.env.NODE_ENV === 'production' ? { baseUrl: `${window.location.origin.replace(/\/$/, '')}/api-proxy` } : {})
+  } as any);
 
   static async analyzeConversation(transcript: string): Promise<ConversationAnalysis> {
     const response = await this.ai.models.generateContent({
@@ -69,16 +73,20 @@ export class AIService {
   static async storeMemory(memory: Omit<MemoryItem, 'userId' | 'createdAt'>): Promise<void> {
     if (!auth.currentUser) throw new Error("User not authenticated");
 
-    // Generate embedding for semantic search
-    const embedResult = await this.ai.models.embedContent({
-      model: "gemini-embedding-2-preview",
-      contents: [memory.content],
-    });
-    const embedding = embedResult.embeddings[0].values;
+    let embedding: number[] | undefined;
+    
+    if (memory.content && memory.content.trim() !== "") {
+      // Generate embedding for semantic search
+      const embedResult = await this.ai.models.embedContent({
+        model: "gemini-embedding-2-preview",
+        contents: [memory.content],
+      });
+      embedding = embedResult.embeddings[0].values;
+    }
 
     await addDoc(collection(db, 'memories'), {
       ...memory,
-      embedding,
+      embedding: embedding || [],
       userId: auth.currentUser.uid,
       createdAt: serverTimestamp(),
     });
@@ -87,17 +95,11 @@ export class AIService {
   static async searchMemory(textQuery: string): Promise<MemoryItem[]> {
     if (!auth.currentUser) throw new Error("User not authenticated");
 
-    // Get embedding for the query
-    const embedResult = await this.ai.models.embedContent({
-      model: "gemini-embedding-2-preview",
-      contents: [textQuery],
-    });
-    const queryEmbedding = embedResult.embeddings[0].values;
-
     // Fetch user's memories
     const q = query(
       collection(db, 'memories'),
       where('userId', '==', auth.currentUser.uid),
+      orderBy('createdAt', 'desc'),
       limit(50)
     );
     const querySnapshot = await getDocs(q);
@@ -106,6 +108,17 @@ export class AIService {
     querySnapshot.forEach((doc) => {
       memories.push({ id: doc.id, ...doc.data() });
     });
+
+    if (!textQuery || textQuery.trim() === "") {
+      return memories.slice(0, 5);
+    }
+
+    // Get embedding for the query
+    const embedResult = await this.ai.models.embedContent({
+      model: "gemini-embedding-2-preview",
+      contents: [textQuery],
+    });
+    const queryEmbedding = embedResult.embeddings[0].values;
 
     // Semantic search (cosine similarity)
     const results = memories.map(m => {
@@ -194,6 +207,108 @@ export class AIService {
     const magA = Math.sqrt(vecA.reduce((sum, a) => sum + a * a, 0));
     const magB = Math.sqrt(vecB.reduce((sum, b) => sum + b * b, 0));
     return dotProduct / (magA * magB);
+  }
+
+  static async memorizeStructured(text: string): Promise<void> {
+    if (!auth.currentUser) throw new Error("User not authenticated");
+
+    const response = await this.ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Extract the core information from this request to memorize it. 
+      Provide a concise content summary and a structured JSON representation of the key facts.
+      Text: "${text}"`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            content: { type: Type.STRING },
+            structuredData: { type: Type.OBJECT },
+            type: { type: Type.STRING, enum: ["meeting", "idea", "task", "note", "personal"] },
+            priority: { type: Type.STRING, enum: ["low", "medium", "high"] },
+          },
+          required: ["content", "structuredData", "type", "priority"],
+        },
+      },
+    });
+
+    const data = JSON.parse(response.text);
+    
+    // Generate embedding
+    const embedResult = await this.ai.models.embedContent({
+      model: "gemini-embedding-2-preview",
+      contents: [data.content],
+    });
+    const embedding = embedResult.embeddings[0].values;
+
+    await addDoc(collection(db, 'memories'), {
+      ...data,
+      rawText: text,
+      embedding,
+      userId: auth.currentUser.uid,
+      createdAt: serverTimestamp(),
+    });
+  }
+
+  static async analyzeCall(phoneNumber: string, transcript: string): Promise<any> {
+    if (!auth.currentUser) throw new Error("User not authenticated");
+
+    const response = await this.ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Analyze this call transcript from ${phoneNumber}. 
+      Extract a summary, the context/intent, and any actionable reminders or calendar events.
+      Transcript: ${transcript}`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { type: Type.STRING },
+            context: { type: Type.STRING },
+            reminders: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  dueDate: { type: Type.STRING, description: "ISO 8601 format" },
+                },
+                required: ["title", "dueDate"],
+              },
+            },
+          },
+          required: ["summary", "context", "reminders"],
+        },
+      },
+    });
+
+    const analysis = JSON.parse(response.text);
+    
+    // Store Call Log
+    const logRef = await addDoc(collection(db, 'callLogs'), {
+      phoneNumber,
+      transcript,
+      summary: analysis.summary,
+      context: analysis.context,
+      timestamp: serverTimestamp(),
+      userId: auth.currentUser.uid,
+      remindersExtracted: analysis.reminders.map((r: any) => r.title)
+    });
+
+    // Store Reminders
+    for (const reminder of analysis.reminders) {
+      await addDoc(collection(db, 'reminders'), {
+        ...reminder,
+        source: 'call',
+        sourceId: logRef.id,
+        status: 'pending',
+        userId: auth.currentUser.uid,
+        createdAt: serverTimestamp(),
+      });
+    }
+
+    return analysis;
   }
 
   static async testConnection() {

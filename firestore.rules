@@ -117,6 +117,20 @@ service cloud.firestore {
       allow delete: if isDocOwner() || isAdmin();
     }
 
+    match /callLogs/{logId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && userIdUnchanged();
+      allow update: if isDocOwner() && userIdNotModified();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /reminders/{reminderId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && userIdUnchanged();
+      allow update: if isDocOwner() && userIdNotModified();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
     match /shared/{shareId} {
       allow read: if isAuthenticated();
       allow write: if isAdmin();

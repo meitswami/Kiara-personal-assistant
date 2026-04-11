@@ -9,13 +9,13 @@ graph TD
     subgraph Client [Frontend - React/Vite]
         UI[Kiara UI]
         Core[Assistant Core]
-        Live[Live Session - Gemini]
+        Live[Live Session - Intelligence Engine]
         Audio[Audio Engine]
         Avatar[3D Avatar - Three.js]
     end
 
     subgraph Backend [Services]
-        AI[AI Service - Gemini 3]
+        AI[AI Service - Multimodal Engine]
         ERP[ERP Service - Axios]
         Memory[Memory Engine - Firestore]
     end
@@ -45,7 +45,7 @@ The central orchestrator that manages the lifecycle of all modules.
 - **memoryEngine**: Interfaces with Firestore for semantic storage.
 - **erpConnector**: Bridges the system with the external project management portal.
 
-### AI Service (Gemini 3)
+### AI Service (Multimodal Engine)
 - **analyzeConversation**: Extracts topic, intent, and action items.
 - **generateIdeas**: Synthesizes stored memories into business opportunities.
 - **searchMemory**: Performs semantic search using vector embeddings.
@@ -68,7 +68,7 @@ The central orchestrator that manages the lifecycle of all modules.
 
 ## 5. Integration Flow
 1. **Trigger**: User starts recording a meeting.
-2. **Capture**: Audio Engine streams PCM16 to Gemini Live.
+2. **Capture**: Audio Engine streams PCM16 to Intelligence Engine.
 3. **Analyze**: On session end, `AIService` processes the transcript.
 4. **Memory**: Analysis is stored in Firestore with vector embeddings.
 5. **Action**: `AssistantCore` identifies high-priority items and calls `ERPService.createTask`.

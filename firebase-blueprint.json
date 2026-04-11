@@ -10,6 +10,8 @@
         "whatsapp": { "type": "string" },
         "email": { "type": "string", "format": "email" },
         "role": { "type": "string", "enum": ["admin", "user"] },
+        "gender": { "type": "string", "enum": ["male", "female", "other"] },
+        "aiPersonality": { "type": "string", "enum": ["cool", "romantic", "normal", "sassy", "professional"] },
         "profile": { "type": "object", "description": "Detailed profile like location, skillset, etc." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -20,8 +22,10 @@
       "description": "A stored insight or conversation summary.",
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["meeting", "idea", "task", "note"] },
+        "type": { "type": "string", "enum": ["meeting", "idea", "task", "note", "personal"] },
         "content": { "type": "string" },
+        "rawText": { "type": "string", "description": "The exact text user asked to memorize" },
+        "structuredData": { "type": "object", "description": "JSON representation of the memory" },
         "embedding": { "type": "array", "items": { "type": "number" } },
         "entities": { "type": "object" },
         "actionItems": { "type": "array", "items": { "type": "string" } },
@@ -30,6 +34,37 @@
         "userId": { "type": "string" }
       },
       "required": ["type", "content", "createdAt", "userId"]
+    },
+    "CallLog": {
+      "title": "CallLog",
+      "description": "Transcripts and analysis of mobile calls.",
+      "type": "object",
+      "properties": {
+        "phoneNumber": { "type": "string" },
+        "transcript": { "type": "string" },
+        "summary": { "type": "string" },
+        "context": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "remindersExtracted": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["phoneNumber", "transcript", "userId", "timestamp"]
+    },
+    "Reminder": {
+      "title": "Reminder",
+      "description": "Alerts and calendar events extracted from conversations or calls.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "source": { "type": "string", "enum": ["call", "manual", "conversation"] },
+        "sourceId": { "type": "string", "description": "ID of the call or memory this came from" },
+        "status": { "type": "string", "enum": ["pending", "completed", "dismissed"] },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "userId", "dueDate", "status"]
     },
     "Task": {
       "title": "Task",
@@ -76,6 +111,14 @@
     "/shared/{shareId}": {
       "schema": "SharedResource",
       "description": "Permissions for shared content."
+    },
+    "/callLogs/{logId}": {
+      "schema": "CallLog",
+      "description": "Analyzed call logs from mobile."
+    },
+    "/reminders/{reminderId}": {
+      "schema": "Reminder",
+      "description": "User reminders and calendar events."
     }
   }
 }

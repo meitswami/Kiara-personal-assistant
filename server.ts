@@ -6,6 +6,11 @@ import cors from "cors";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
+import { createProxyMiddleware } from 'http-proxy-middleware';
+import dotenv from 'dotenv';
+
+// Load environment variables from .env if it exists
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,6 +84,53 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Intelligence Engine API Proxy
+  // This handles requests from the frontend that are routed through /api-proxy
+  // It injects the real API_KEY from the server environment
+  console.log("Server: Initializing Intelligence Engine API Proxy...");
+  const realApiKey = process.env.GEMINI_API_KEY;
+  console.log("Server: GEMINI_API_KEY status:", realApiKey ? "Set (starts with " + realApiKey.substring(0, 4) + ")" : "NOT SET");
+
+  const proxyMiddleware = createProxyMiddleware({
+    target: 'https://generativelanguage.googleapis.com',
+    changeOrigin: true,
+    ws: true,
+    pathRewrite: {
+      '^/api-proxy': '', 
+    },
+    on: {
+      proxyReq: (proxyReq, req) => {
+        // Inject API key into the path for regular HTTP requests
+        const url = new URL(proxyReq.path, 'https://generativelanguage.googleapis.com');
+        const key = url.searchParams.get('key');
+        if (key === 'MY_GEMINI_API_KEY' || !key || key === 'undefined' || key === '') {
+          if (realApiKey) {
+            url.searchParams.set('key', realApiKey);
+            proxyReq.path = url.pathname + url.search;
+            console.log(`Proxy (HTTP): Injected key for ${url.pathname}`);
+          }
+        }
+      },
+      proxyReqWs: (proxyReq, req, socket, options, head) => {
+        // Inject API key into the path for WebSocket requests
+        const url = new URL(proxyReq.path, 'https://generativelanguage.googleapis.com');
+        const key = url.searchParams.get('key');
+        if (key === 'MY_GEMINI_API_KEY' || !key || key === 'undefined' || key === '') {
+          if (realApiKey) {
+            url.searchParams.set('key', realApiKey);
+            proxyReq.path = url.pathname + url.search;
+            console.log(`Proxy (WS): Injected key for ${url.pathname}`);
+          }
+        }
+      },
+      error: (err, req, res) => {
+        console.error('Proxy Error:', err);
+      }
+    },
+  });
+
+  app.use('/api-proxy', proxyMiddleware);
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -94,8 +146,16 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // Handle WebSocket upgrade for the proxy
+  server.on('upgrade', (req, socket, head) => {
+    if (req.url?.includes('/api-proxy')) {
+      console.log(`Proxy (WS Upgrade): Handling upgrade for ${req.url}`);
+      (proxyMiddleware as any).upgrade(req, socket, head);
+    }
   });
 }
 

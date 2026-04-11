@@ -14,18 +14,10 @@ export class AudioStreamer {
   constructor(private sampleRate: number = 16000) {}
 
   async startRecording(onAudioData: (base64Data: string) => void) {
+    console.log("AudioStreamer: startRecording called");
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error("Browser does not support microphone access. Please use a modern browser like Chrome or Edge.");
-      }
-
-      // Check available devices first
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const audioInputs = devices.filter(device => device.kind === 'audioinput');
-      console.log("Detected audio input devices:", audioInputs);
-
-      if (audioInputs.length === 0) {
-        throw new Error("No microphone detected. Please ensure your microphone is plugged in and recognized by your system.");
       }
 
       // Try multiple constraint patterns from most specific to least
@@ -35,7 +27,7 @@ export class AudioStreamer {
         { audio: true }
       ];
 
-      let lastError = null;
+      let lastError: any = null;
       for (const constraints of constraintPatterns) {
         try {
           this.stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -50,6 +42,14 @@ export class AudioStreamer {
       }
 
       if (!this.stream) {
+        // If we failed to get a stream, NOW check if it's because there are no devices
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(device => device.kind === 'audioinput');
+        
+        if (audioInputs.length === 0) {
+          throw new Error("No microphone detected. Please ensure your microphone is plugged in and recognized by your system.");
+        }
+        
         throw lastError || new Error("Could not access microphone.");
       }
 
