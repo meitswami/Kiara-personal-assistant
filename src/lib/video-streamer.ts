@@ -10,7 +10,7 @@ export class VideoStreamer {
   private context: CanvasRenderingContext2D | null = null;
   private interval: number | null = null;
 
-  async start(onFrame: (base64Data: string) => void) {
+  async start(onFrame: (base64Data: string) => void, previewElement?: HTMLVideoElement) {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -20,22 +20,29 @@ export class VideoStreamer {
         }
       });
 
-      this.videoElement = document.createElement("video");
+      if (previewElement) {
+        this.videoElement = previewElement;
+      } else {
+        this.videoElement = document.createElement("video");
+      }
+      
       this.videoElement.srcObject = this.stream;
-      this.videoElement.play();
+      this.videoElement.onloadedmetadata = () => {
+        this.videoElement?.play();
+      };
 
       this.canvas = document.createElement("canvas");
-      this.canvas.width = 320; // Reduced size for better performance
-      this.canvas.height = 240;
-      this.context = this.canvas.getContext("2d");
+      this.canvas.width = 640; // Increased for better object recognition
+      this.canvas.height = 480;
+      this.context = this.canvas.getContext("2d", { alpha: false });
 
       this.interval = window.setInterval(() => {
         if (this.videoElement && this.context && this.canvas) {
           this.context.drawImage(this.videoElement, 0, 0, this.canvas.width, this.canvas.height);
-          const base64 = this.canvas.toDataURL("image/jpeg", 0.5).split(",")[1];
+          const base64 = this.canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
           onFrame(base64);
         }
-      }, 1000); // Send 1 frame per second for vision
+      }, 1000); // Send 1 frame per second for vision to save quota
     } catch (error) {
       console.error("Error starting video stream:", error);
       throw error;

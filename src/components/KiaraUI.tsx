@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, MicOff, Power, Globe, Zap, Heart, Sparkles, Shield, X, Send, MessageSquare, Coins, Settings, Bell, Smartphone, Volume2, ChevronDown } from 'lucide-react';
+import { Mic, MicOff, Power, Globe, Zap, Heart, Sparkles, Shield, X, Send, MessageSquare, Coins, Settings, Bell, Smartphone, Volume2, ChevronDown, ClosedCaption, Database, Search, Pin } from 'lucide-react';
 import { AudioStreamer } from '../lib/audio-streamer';
 import { VideoStreamer } from '../lib/video-streamer';
 import { LiveSession, SessionState } from '../lib/live-session';
@@ -15,10 +15,13 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import { RegistrationForm } from './RegistrationForm';
 import { LoginForm } from './LoginForm';
 import { AdminPanel } from './AdminPanel';
-import { Avatar } from './Avatar';
-import { collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { TalkingAvatar } from './TalkingAvatar';
+import { collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { assistantCore } from '../lib/assistant-core';
+
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell, AreaChart, Area } from 'recharts';
+import { WifiOff } from 'lucide-react';
 
 interface Message {
   id: string;
@@ -51,8 +54,37 @@ export const KiaraUI: React.FC = () => {
   const [incomingCall, setIncomingCall] = useState<{ phone: string; transcript: string } | null>(null);
   const [analyzingCall, setAnalyzingCall] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isFocusMode, setIsFocusMode] = useState(false);
+  const [pinnedMemories, setPinnedMemories] = useState<string[]>([]);
   const [memories, setMemories] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<any[] | null>(null);
   const [reminders, setReminders] = useState<any[]>([]);
+
+  const handleSearchMemory = async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    try {
+      const results = await AIService.searchMemory(query);
+      setSearchResults(results);
+      console.log("Memory search results:", results);
+    } catch (err) {
+      console.error("Memory search failed:", err);
+    }
+  };
+
+  const handleMemorize = async (text: string) => {
+    addLog("Kiara is memorizing this for you...");
+    try {
+      await AIService.memorizeStructured(text);
+      addLog("Memory stored successfully in JSON and Database.");
+    } catch (err) {
+      console.error("Memorization failed:", err);
+      addLog("Failed to memorize. Please try again.");
+    }
+  };
   const [chatInput, setChatInput] = useState("");
   const [showChat, setShowChat] = useState(false);
   const [tokens, setTokens] = useState({ used: 1240, total: 50000 }); // Mock token data
@@ -60,7 +92,13 @@ export const KiaraUI: React.FC = () => {
   const [showInsights, setShowInsights] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isVisionOn, setIsVisionOn] = useState(false);
+  const [showCaptions, setShowCaptions] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [visualization, setVisualization] = useState<any>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [selectedModel, setSelectedModel] = useState("gemini-2.0-flash-exp");
+  const lastSavedMessageRef = useRef<string | null>(null);
   const [settings, setSettings] = useState({
     wakeWord: false,
     mobileWake: false,
@@ -69,8 +107,53 @@ export const KiaraUI: React.FC = () => {
   
   const audioStreamerRef = useRef<AudioStreamer | null>(null);
   const videoStreamerRef = useRef<VideoStreamer | null>(null);
+  const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
   const liveSessionRef = useRef<LiveSession | null>(null);
   const recognitionRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      
+      // Save/Update the message in Firestore
+      AIService.saveMessage(lastMsg.id, lastMsg.text, lastMsg.sender);
+      
+      // If it's a new message ID, check if we should trigger knowledge extraction
+      if (lastMsg.id !== lastSavedMessageRef.current) {
+        lastSavedMessageRef.current = lastMsg.id;
+        
+        // Every 5 messages, try to extract knowledge
+        if (messages.length % 5 === 0) {
+          AIService.extractKnowledgeFromRecent();
+        }
+      }
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleVisualize = (e: any) => {
+      setVisualization(e.detail);
+      setShowChat(false);
+      setShowMemory(false);
+      setShowInsights(false);
+    };
+
+    window.addEventListener('kiara-visualize', handleVisualize);
+    return () => window.removeEventListener('kiara-visualize', handleVisualize);
+  }, []);
 
   useEffect(() => {
     // Initialize Speech Recognition for Wake Word
@@ -105,6 +188,18 @@ export const KiaraUI: React.FC = () => {
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           setUserProfile(docSnap.data());
+        } else {
+          // Create initial profile if it doesn't exist
+          const initialProfile = {
+            email: u.email,
+            firstName: u.displayName?.split(' ')[0] || 'User',
+            lastName: u.displayName?.split(' ').slice(1).join(' ') || '',
+            role: 'user',
+            aiPersonality: 'sassy',
+            createdAt: new Date().toISOString()
+          };
+          await setDoc(docRef, initialProfile);
+          setUserProfile(initialProfile);
         }
         AIService.testConnection();
 
@@ -133,6 +228,7 @@ export const KiaraUI: React.FC = () => {
         
         // Initial ERP Sync
         assistantCore.syncWithERP();
+        AIService.syncOfflineData();
 
         return () => {
           unsubMemories();
@@ -168,40 +264,61 @@ export const KiaraUI: React.FC = () => {
       console.log("Task generation triggered");
     };
 
-    const handleSearchMemory = async (e: any) => {
-      const { query } = e.detail;
-      try {
-        const results = await AIService.searchMemory(query);
-        console.log("Memory search results:", results);
-      } catch (err) {
-        console.error("Memory search failed:", err);
-      }
-    };
-
-    const handleMemorize = async (e: any) => {
-      const { text } = e.detail;
-      addLog("Kiara is memorizing this for you...");
-      try {
-        await AIService.memorizeStructured(text);
-        addLog("Memory stored successfully in JSON and Database.");
-      } catch (err) {
-        console.error("Memorization failed:", err);
-        addLog("Failed to memorize. Please try again.");
-      }
-    };
+    const onSearchMemory = (e: any) => handleSearchMemory(e.detail.query);
+    const onMemorize = (e: any) => handleMemorize(e.detail.text);
+    const onToggleFocus = () => setIsFocusMode(prev => !prev);
+    const onToggleVision = (e: any) => setIsVisionOn(e.detail.enabled);
+    const onToggleChat = (e: any) => setShowChat(e.detail.enabled);
+    const onToggleMemory = (e: any) => setShowMemory(e.detail.enabled);
 
     window.addEventListener("kiara-summarize", handleSummarize);
     window.addEventListener("kiara-create-tasks", handleCreateTasks);
-    window.addEventListener("kiara-search-memory", handleSearchMemory);
-    window.addEventListener("kiara-memorize", handleMemorize);
+    window.addEventListener("kiara-search-memory", onSearchMemory);
+    window.addEventListener("kiara-memorize", onMemorize);
+    window.addEventListener("kiara-toggle-focus", onToggleFocus);
+    window.addEventListener("kiara-toggle-vision", onToggleVision);
+    window.addEventListener("kiara-toggle-chat", onToggleChat);
+    window.addEventListener("kiara-toggle-memory", onToggleMemory);
+    window.addEventListener("online", () => AIService.syncOfflineData());
+
+    // Keyboard Shortcuts
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only trigger if not typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      switch (e.key.toLowerCase()) {
+        case 'c':
+          setShowChat(prev => !prev);
+          break;
+        case 'm':
+          setShowMemory(prev => !prev);
+          break;
+        case 'v':
+          setIsVisionOn(prev => !prev);
+          break;
+        case 'p':
+          togglePower();
+          break;
+        case 'f':
+          setIsFocusMode(prev => !prev);
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
 
     return () => {
       handleDisconnect();
       unsubscribe();
       window.removeEventListener("kiara-summarize", handleSummarize);
       window.removeEventListener("kiara-create-tasks", handleCreateTasks);
-      window.removeEventListener("kiara-search-memory", handleSearchMemory);
-      window.removeEventListener("kiara-memorize", handleMemorize);
+      window.removeEventListener("kiara-search-memory", onSearchMemory);
+      window.removeEventListener("kiara-memorize", onMemorize);
+      window.removeEventListener("kiara-toggle-focus", onToggleFocus);
+      window.removeEventListener("kiara-toggle-vision", onToggleVision);
+      window.removeEventListener("kiara-toggle-chat", onToggleChat);
+      window.removeEventListener("kiara-toggle-memory", onToggleMemory);
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
 
@@ -258,6 +375,21 @@ export const KiaraUI: React.FC = () => {
       addLog("Initializing Live Session...");
       liveSessionRef.current = await assistantCore.initializeLiveSession(apiKey);
       
+      addLog("Starting Microphone...");
+      try {
+        // Request microphone access BEFORE connecting to the Live API
+        // This ensures permissions are granted and the user gesture is fresh
+        await audioStreamerRef.current?.startRecording((base64) => {
+          if (liveSessionRef.current) {
+            liveSessionRef.current.sendAudio(base64);
+          }
+        });
+        addLog("Microphone Active");
+      } catch (micError: any) {
+        addLog(`MICROPHONE ERROR: ${micError.message}`);
+        throw micError; // Rethrow to be caught by the main catch block
+      }
+
       addLog("Connecting to Intelligence Engine...");
       await liveSessionRef.current.connect({
         addLog,
@@ -279,14 +411,16 @@ export const KiaraUI: React.FC = () => {
         },
         onTranscription: (text, isModel) => {
           if (isModel) setAudioLevel(0.2);
+          console.log(`Transcription (${isModel ? 'Kiara' : 'User'}):`, text);
           
           setMessages(prev => {
             const lastMsg = prev[prev.length - 1];
             const sender = isModel ? 'kiara' : 'user';
             
-            // If the last message is from the same sender and was within the last 2 seconds, update it
-            // This handles the streaming nature of transcriptions
-            if (lastMsg && lastMsg.sender === sender && (new Date().getTime() - lastMsg.timestamp.getTime() < 2000)) {
+            // Increase merge window for better streaming display
+            const mergeWindow = isModel ? 5000 : 3000;
+            
+            if (lastMsg && lastMsg.sender === sender && (new Date().getTime() - lastMsg.timestamp.getTime() < mergeWindow)) {
               const newMessages = [...prev];
               newMessages[newMessages.length - 1] = {
                 ...lastMsg,
@@ -313,41 +447,38 @@ export const KiaraUI: React.FC = () => {
           addLog(`API ERROR: ${errMsg}`);
           console.error("Live API Error:", err);
           setIsPowerOn(false);
-          alert(`Kiara Connection Error: ${errMsg}`);
+          
+          // Provide more helpful error message for Code 1006
+          if (errMsg.includes("1006")) {
+            alert(`Kiara Connection Error: The connection was closed unexpectedly (1006). This usually means the API key is invalid or the server proxy is misconfigured. Please check your GEMINI_API_KEY.`);
+          } else {
+            alert(`Kiara Connection Error: ${errMsg}`);
+          }
         }
       }, {
         gender: userProfile?.gender,
-        personality: userProfile?.aiPersonality,
-        userName: userProfile?.firstName
+        personality: isFocusMode ? 'professional' : userProfile?.aiPersonality,
+        userName: userProfile?.firstName,
+        model: selectedModel
       });
-
-      addLog("Starting Microphone...");
-      try {
-        const permissionStatus = await navigator.permissions.query({ name: 'microphone' as any });
-        addLog(`Mic Permission: ${permissionStatus.state}`);
-      } catch (e) {
-        addLog("Permission check skipped (not supported)");
-      }
-      
-      await audioStreamerRef.current?.startRecording((base64) => {
-        if (liveSessionRef.current) {
-          liveSessionRef.current.sendAudio(base64);
-        }
-      });
-
-      if (isVisionOn) {
-        addLog("Starting Vision...");
-        await videoStreamerRef.current?.start((base64) => {
-          if (liveSessionRef.current) {
-            liveSessionRef.current.sendVideo(base64);
-          }
-        });
-      }
 
       // Final check if we are still connected before going live
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      if (stateRef.current === "disconnected") {
-        throw new Error("Connection lost during initialization");
+      // Increase timeout to 3 seconds for slower connections in production
+      addLog("Verifying connection stability...");
+      let attempts = 0;
+      while (attempts < 30) { // 3 seconds total
+        if (stateRef.current === "connected" || stateRef.current === "speaking" || stateRef.current === "listening") {
+          break;
+        }
+        if (stateRef.current === "disconnected") {
+          throw new Error("Connection lost during initialization. Please check your internet connection.");
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+
+      if (stateRef.current === "disconnected" || stateRef.current === "connecting") {
+        throw new Error("Connection timed out. The Intelligence Engine is taking too long to respond.");
       }
 
       addLog("System Live!");
@@ -361,6 +492,29 @@ export const KiaraUI: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    const startVision = async () => {
+      if (isVisionOn) {
+        addLog("Requesting Camera Permission...");
+        try {
+          await videoStreamerRef.current?.start((base64) => {
+            if (liveSessionRef.current && stateRef.current !== "disconnected") {
+              liveSessionRef.current.sendVideo(base64);
+            }
+          }, videoPreviewRef.current || undefined);
+          addLog("Vision Started Successfully");
+        } catch (err) {
+          addLog(`Vision Error: ${err}`);
+          setIsVisionOn(false);
+        }
+      } else {
+        videoStreamerRef.current?.stop();
+      }
+    };
+    
+    startVision();
+  }, [isVisionOn]);
+
   const handleDisconnect = () => {
     audioStreamerRef.current?.stopRecording();
     videoStreamerRef.current?.stop();
@@ -368,6 +522,9 @@ export const KiaraUI: React.FC = () => {
     liveSessionRef.current?.disconnect();
     setIsPowerOn(false);
     setState("disconnected");
+    
+    // Final knowledge extraction when session ends
+    AIService.extractKnowledgeFromRecent();
   };
 
   const togglePower = () => {
@@ -479,8 +636,40 @@ export const KiaraUI: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+      {/* Live Captions Overlay */}
+      <AnimatePresence>
+        {showCaptions && messages.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-32 left-1/2 -translate-x-1/2 z-[90] w-full max-w-xl px-4 pointer-events-none"
+          >
+            <div className="bg-black/90 backdrop-blur-3xl border border-white/20 rounded-2xl p-6 shadow-[0_0_50px_rgba(0,0,0,0.5)] text-center">
+              <div className="flex items-center justify-center gap-4 mb-3">
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${messages[messages.length - 1].sender === 'kiara' ? 'bg-pink-500 shadow-[0_0_10px_rgba(236,72,153,0.8)]' : 'bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.8)]'} animate-pulse`} />
+                  <span className="text-[10px] uppercase tracking-[0.2em] text-gray-400 font-black">
+                    {messages[messages.length - 1].sender === 'kiara' ? 'KIARA' : 'YOU'}
+                  </span>
+                </div>
+                {isVisionOn && (
+                  <div className="flex items-center gap-1 px-2 py-0.5 bg-blue-500/20 border border-blue-500/30 rounded-full">
+                    <Smartphone className="w-2 h-2 text-blue-400" />
+                    <span className="text-[8px] text-blue-400 font-bold uppercase tracking-widest">Vision Active</span>
+                  </div>
+                )}
+              </div>
+              <p className="text-xl md:text-2xl font-medium leading-tight text-white drop-shadow-md">
+                {messages[messages.length - 1].text}
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Debug Overlay */}
-      {debugLogs.length > 0 && (
+      {showDebug && debugLogs.length > 0 && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] w-full max-w-xs pointer-events-none">
           <div className="bg-black/80 backdrop-blur-md border border-white/10 rounded-xl p-3 space-y-1">
             <div className="text-[8px] uppercase tracking-widest text-gray-500 mb-1">Debug Logs</div>
@@ -492,6 +681,29 @@ export const KiaraUI: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Vision Preview */}
+      <AnimatePresence>
+        {isVisionOn && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8, x: 20 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, scale: 0.8, x: 20 }}
+            className="fixed top-24 right-6 z-[80] w-48 h-36 bg-black rounded-2xl border-2 border-blue-500/50 overflow-hidden shadow-2xl"
+          >
+            <video 
+              ref={videoPreviewRef}
+              autoPlay 
+              muted 
+              playsInline 
+              className="w-full h-full object-cover mirror"
+            />
+            <div className="absolute top-2 left-2 px-2 py-0.5 bg-blue-500/80 rounded text-[8px] font-bold uppercase tracking-widest">
+              Live Vision {isPowerOn ? '(Active)' : '(Preview)'}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Background Atmosphere */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-pink-500/10 rounded-full blur-[120px]" />
@@ -532,6 +744,13 @@ export const KiaraUI: React.FC = () => {
               title={isVisionOn ? "Vision Enabled" : "Enable Vision"}
             >
               <Smartphone className={`w-4 h-4 ${isVisionOn ? 'animate-pulse' : ''}`} />
+            </button>
+            <button 
+              onClick={() => setShowCaptions(!showCaptions)}
+              className={`p-2 rounded-lg transition-all duration-300 ${showCaptions ? 'bg-pink-500/20 text-pink-400 shadow-[0_0_15px_rgba(236,72,153,0.3)]' : 'bg-white/5 text-gray-400 hover:bg-white/10'}`}
+              title="Live Captions"
+            >
+              <ClosedCaption className="w-4 h-4" />
             </button>
             {user ? (
             <div className="flex items-center gap-3">
@@ -698,6 +917,25 @@ export const KiaraUI: React.FC = () => {
                   </button>
                 </div>
 
+                {/* Model Selection */}
+                <div className="space-y-2">
+                  <label className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">AI Intelligence Model</label>
+                  <div className="relative">
+                    <select 
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:border-pink-500/50 transition-colors"
+                    >
+                      <option value="gemini-2.0-flash-exp" className="bg-[#111]">Gemini 2.0 Flash (Live)</option>
+                      <option value="gemini-1.5-flash" className="bg-[#111]">Gemini 1.5 Flash (Stable)</option>
+                      <option value="gemini-1.5-pro" className="bg-[#111]">Gemini 1.5 Pro (Deep)</option>
+                    </select>
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                      <ChevronDown className="w-4 h-4" />
+                    </div>
+                  </div>
+                </div>
+
                 {/* Personality Selection */}
                 <div className="space-y-3 pt-4 border-t border-white/5">
                   <div className="flex items-center gap-3">
@@ -715,7 +953,7 @@ export const KiaraUI: React.FC = () => {
                       onChange={async (e) => {
                         const p = e.target.value;
                         if (user) {
-                          await updateDoc(doc(db, 'users', user.uid), { aiPersonality: p });
+                          await setDoc(doc(db, 'users', user.uid), { aiPersonality: p }, { merge: true });
                           setUserProfile((prev: any) => ({ ...prev, aiPersonality: p }));
                           addLog(`Personality changed to ${p}. Restart session to apply.`);
                         }
@@ -726,6 +964,10 @@ export const KiaraUI: React.FC = () => {
                       <option value="romantic" className="bg-[#111]">Romantic</option>
                       <option value="cool" className="bg-[#111]">Cool</option>
                       <option value="professional" className="bg-[#111]">Professional</option>
+                      <option value="father" className="bg-[#111]">Father</option>
+                      <option value="guide" className="bg-[#111]">Guide & Mentor</option>
+                      <option value="brotherhood" className="bg-[#111]">Brotherhood</option>
+                      <option value="sisterhood" className="bg-[#111]">Sisterhood</option>
                       <option value="normal" className="bg-[#111]">Normal</option>
                     </select>
                     <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
@@ -739,6 +981,52 @@ export const KiaraUI: React.FC = () => {
                 <p className="text-[10px] text-gray-500 text-center">
                   Mobile settings require native APK bridge to function.
                 </p>
+                
+                {/* Focus Mode Toggle */}
+                <div className="flex items-center justify-between pt-4 border-t border-white/5">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${isFocusMode ? 'bg-purple-500/10 text-purple-500' : 'bg-gray-500/10 text-gray-500'}`}>
+                      <Zap className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold">Focus Mode</h3>
+                      <p className="text-[10px] text-gray-500">Minimize chit-chat & direct responses</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setIsFocusMode(!isFocusMode)}
+                    className={`w-12 h-6 rounded-full transition-colors relative ${isFocusMode ? 'bg-purple-500' : 'bg-white/10'}`}
+                  >
+                    <motion.div 
+                      animate={{ x: isFocusMode ? 24 : 4 }}
+                      className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-lg"
+                    />
+                  </button>
+                </div>
+
+                {/* Debug Mode */}
+                <div className="mt-4 pt-4 border-t border-white/5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-lg bg-blue-500/10">
+                        <Shield className="w-5 h-5 text-blue-500" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold">Debug Mode</h3>
+                        <p className="text-[10px] text-gray-500">Show system logs for troubleshooting</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowDebug(!showDebug)}
+                      className={`w-12 h-6 rounded-full transition-colors relative ${showDebug ? 'bg-blue-500' : 'bg-white/10'}`}
+                    >
+                      <motion.div 
+                        animate={{ x: showDebug ? 24 : 4 }}
+                        className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-lg"
+                      />
+                    </button>
+                  </div>
+                </div>
               </div>
             </motion.div>
           </div>
@@ -788,7 +1076,92 @@ export const KiaraUI: React.FC = () => {
       {/* Central Visualizer */}
       <div className="relative flex flex-col items-center justify-center w-full max-w-md flex-1">
         <AnimatePresence mode="wait">
-          {showChat ? (
+          {visualization ? (
+            <motion.div
+              key="visualization"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full bg-black/80 backdrop-blur-2xl border border-white/10 rounded-3xl p-6 flex flex-col relative z-20"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-lg font-bold text-white">{visualization.title}</h3>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-widest">{visualization.type} Chart</p>
+                </div>
+                <button 
+                  onClick={() => setVisualization(null)}
+                  className="p-2 rounded-lg bg-white/5 text-gray-400 hover:bg-white/10 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="h-[300px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  {visualization.type === 'bar' ? (
+                    <BarChart data={visualization.data}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                      <XAxis dataKey="name" stroke="#666" fontSize={10} />
+                      <YAxis stroke="#666" fontSize={10} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px', fontSize: '10px' }}
+                        itemStyle={{ color: '#ec4899' }}
+                      />
+                      <Bar dataKey="value" fill="#ec4899" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  ) : visualization.type === 'line' ? (
+                    <LineChart data={visualization.data}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                      <XAxis dataKey="name" stroke="#666" fontSize={10} />
+                      <YAxis stroke="#666" fontSize={10} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px', fontSize: '10px' }}
+                      />
+                      <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2} dot={{ fill: '#3b82f6' }} />
+                    </LineChart>
+                  ) : visualization.type === 'area' ? (
+                    <AreaChart data={visualization.data}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                      <XAxis dataKey="name" stroke="#666" fontSize={10} />
+                      <YAxis stroke="#666" fontSize={10} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px', fontSize: '10px' }}
+                      />
+                      <Area type="monotone" dataKey="value" stroke="#ec4899" fill="#ec4899" fillOpacity={0.2} />
+                    </AreaChart>
+                  ) : (
+                    <PieChart>
+                      <Pie
+                        data={visualization.data}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                      >
+                        {visualization.data.map((entry: any, index: number) => (
+                          <Cell key={`cell-${index}`} fill={index % 2 === 0 ? '#ec4899' : '#3b82f6'} />
+                        ))}
+                      </Pie>
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px', fontSize: '10px' }}
+                      />
+                    </PieChart>
+                  )}
+                </ResponsiveContainer>
+              </div>
+
+              {visualization.description && (
+                <div className="mt-6 p-4 rounded-2xl bg-white/5 border border-white/5">
+                  <p className="text-xs text-gray-400 leading-relaxed italic">
+                    "{visualization.description}"
+                  </p>
+                </div>
+              )}
+            </motion.div>
+          ) : showChat ? (
             <motion.div
               key="chat"
               initial={{ opacity: 0, scale: 0.95 }}
@@ -798,6 +1171,24 @@ export const KiaraUI: React.FC = () => {
             >
               {/* WhatsApp Background Pattern */}
               <div className="absolute inset-0 chat-bg pointer-events-none" />
+              
+              <div className="p-3 border-b border-white/10 bg-[#202c33] flex items-center justify-between relative z-10">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-pink-500 flex items-center justify-center">
+                    <Sparkles className="w-4 h-4 text-white" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold">Kiara Chat</h4>
+                    <p className="text-[8px] text-green-500">Online</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setMessages([])}
+                  className="text-[10px] text-gray-400 hover:text-white transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
               
               <div className="flex-1 min-h-[350px] max-h-[450px] overflow-y-auto p-4 flex flex-col gap-2 scrollbar-hide relative z-10">
                 {messages.length > 0 ? (
@@ -871,9 +1262,9 @@ export const KiaraUI: React.FC = () => {
               exit={{ opacity: 0, scale: 0.95 }}
               className="relative flex items-center justify-center w-full aspect-square"
             >
-              {/* 3D Avatar */}
-              <div className="absolute inset-0 z-10">
-                <Avatar isSpeaking={state === "speaking"} audioLevel={audioLevel} />
+              {/* Real AI Talking Avatar */}
+              <div className="absolute inset-0 z-10 overflow-hidden rounded-full border-4 border-white/10 shadow-2xl">
+                <TalkingAvatar isSpeaking={state === "speaking"} audioLevel={audioLevel} />
               </div>
 
               {/* Outer Rings */}
@@ -906,38 +1297,18 @@ export const KiaraUI: React.FC = () => {
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 onClick={togglePower}
-                className={`relative z-20 w-48 h-48 rounded-full flex flex-col items-center justify-center transition-all duration-500 ${
+                className={`relative z-20 w-full h-full rounded-full flex flex-col items-center justify-center transition-all duration-500 ${
                   isPowerOn 
-                    ? 'bg-white/5 shadow-[0_0_50px_rgba(255,255,255,0.1)] border border-white/20' 
-                    : 'bg-white/10 border border-white/10'
+                    ? 'bg-transparent' 
+                    : 'bg-black/60 backdrop-blur-sm border border-white/10'
                 }`}
               >
-                <div className={`absolute inset-0 rounded-full transition-opacity duration-500 ${
-                  isPowerOn ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <div className={`absolute inset-0 rounded-full blur-2xl opacity-20 ${
-                    state === "speaking" ? 'bg-pink-500' : 'bg-blue-500'
-                  }`} />
-                </div>
-
-                {isPowerOn ? (
-                  state === "speaking" ? (
-                    <motion.div 
-                      animate={{ scale: [1, 1.2, 1] }}
-                      transition={{ duration: 0.5, repeat: Infinity }}
-                    >
-                      <Zap className="w-12 h-12 text-pink-500" />
-                    </motion.div>
-                  ) : (
-                    <Mic className={`w-12 h-12 ${state === "listening" ? 'text-blue-400' : 'text-white'}`} />
-                  )
-                ) : (
-                  <Power className="w-12 h-12 text-gray-400" />
+                {!isPowerOn && (
+                  <>
+                    <Power className="w-16 h-16 text-white mb-4" />
+                    <span className="text-sm font-bold tracking-widest uppercase">Power On</span>
+                  </>
                 )}
-                
-                <span className="mt-4 text-[10px] uppercase tracking-widest font-bold">
-                  {isPowerOn ? (state === "disconnected" ? "Connecting" : "Active") : "Power On"}
-                </span>
               </motion.button>
 
 
@@ -971,6 +1342,12 @@ export const KiaraUI: React.FC = () => {
           <div className="flex items-center gap-2">
             <div className={`w-1.5 h-1.5 rounded-full ${isPowerOn ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
             <span>System {isPowerOn ? 'Live' : 'Standby'}</span>
+            {!isOnline && (
+              <div className="flex items-center gap-1 ml-2 px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20">
+                <WifiOff className="w-2 h-2 text-red-400" />
+                <span className="text-[8px] text-red-400 font-black">OFFLINE</span>
+              </div>
+            )}
             <button 
               onClick={async () => {
                 const devices = await navigator.mediaDevices.enumerateDevices();
@@ -1071,42 +1448,62 @@ export const KiaraUI: React.FC = () => {
 
                 {/* Structured Memories Knowledge Base */}
                 <section>
-                  <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <Heart className="w-4 h-4" /> Knowledge Base
-                  </h3>
-                  <div className="overflow-x-auto rounded-2xl border border-white/10">
-                    <table className="w-full text-left text-sm">
-                      <thead className="bg-white/5 text-gray-400 text-[10px] uppercase tracking-wider">
-                        <tr>
-                          <th className="px-4 py-3 font-medium">Type</th>
-                          <th className="px-4 py-3 font-medium">Content</th>
-                          <th className="px-4 py-3 font-medium">Structured Data</th>
-                          <th className="px-4 py-3 font-medium">Date</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {memories.map((m) => (
-                          <tr key={m.id} className="hover:bg-white/[0.02] transition-colors">
-                            <td className="px-4 py-4">
-                              <span className="px-2 py-1 rounded-md bg-pink-500/10 text-pink-500 text-[10px] font-bold uppercase">
-                                {m.type}
-                              </span>
-                            </td>
-                            <td className="px-4 py-4 text-gray-300 max-w-xs truncate">
-                              {m.content}
-                            </td>
-                            <td className="px-4 py-4">
-                              <pre className="text-[10px] font-mono text-blue-400 bg-black/40 p-2 rounded-lg max-h-24 overflow-y-auto">
-                                {JSON.stringify(m.structuredData, null, 2)}
-                              </pre>
-                            </td>
-                            <td className="px-4 py-4 text-[10px] text-gray-500 font-mono">
-                              {m.createdAt?.toDate ? m.createdAt.toDate().toLocaleDateString() : 'Recent'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                      <Database className="w-4 h-4" /> Intelligence Hub
+                    </h3>
+                    <div className="relative w-64">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
+                      <input 
+                        type="text"
+                        placeholder="Search memories..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSearchMemory(searchQuery)}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl py-1.5 pl-9 pr-4 text-xs focus:outline-none focus:border-pink-500/50 transition-colors"
+                      />
+                    </div>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {(searchResults || memories).length === 0 ? (
+                      <p className="text-sm text-gray-600 italic">No memories found.</p>
+                    ) : (
+                      (searchResults || memories).map((m) => (
+                        <div key={m.id} className="bg-white/5 border border-white/10 p-4 rounded-2xl hover:border-pink-500/30 transition-all group">
+                          <div className="flex items-start justify-between mb-2">
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-widest ${
+                              m.type === 'idea' ? 'bg-yellow-500/20 text-yellow-400' :
+                              m.type === 'task' ? 'bg-green-500/20 text-green-400' :
+                              'bg-blue-500/20 text-blue-400'
+                            }`}>
+                              {m.type}
+                            </span>
+                            <button 
+                              onClick={() => {
+                                setPinnedMemories(prev => 
+                                  prev.includes(m.id) ? prev.filter(id => id !== m.id) : [...prev, m.id]
+                                );
+                              }}
+                              className={`p-1 rounded-lg transition-colors ${pinnedMemories.includes(m.id) ? 'text-yellow-500 bg-yellow-500/10' : 'text-gray-600 hover:text-gray-400'}`}
+                            >
+                              <Pin className="w-3 h-3" />
+                            </button>
+                          </div>
+                          <p className="text-xs text-gray-300 leading-relaxed">{m.content}</p>
+                          {m.structuredData && Object.keys(m.structuredData).length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-white/5 grid grid-cols-2 gap-2">
+                              {Object.entries(m.structuredData).map(([k, v]: [string, any]) => (
+                                <div key={k} className="text-[10px]">
+                                  <span className="text-gray-500 block uppercase tracking-tighter">{k}</span>
+                                  <span className="text-gray-300 truncate block">{String(v)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
                   </div>
                 </section>
               </div>

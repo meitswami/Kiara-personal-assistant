@@ -17,7 +17,18 @@ export class AudioStreamer {
     console.log("AudioStreamer: startRecording called");
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Browser does not support microphone access. Please use a modern browser like Chrome or Edge.");
+        console.error("navigator.mediaDevices or getUserMedia is undefined");
+        throw new Error("Browser does not support microphone access. Please use a modern browser like Chrome or Edge and ensure you are on an HTTPS connection.");
+      }
+
+      // Log devices for debugging
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      console.log("Available devices:", devices.map(d => `${d.kind}: ${d.label || 'unlabeled'}`));
+      
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+      if (audioInputs.length === 0) {
+        console.error("No audio input devices found");
+        throw new Error("No microphone detected. Please ensure your microphone is plugged in.");
       }
 
       // Try multiple constraint patterns from most specific to least

@@ -11,7 +11,7 @@
         "email": { "type": "string", "format": "email" },
         "role": { "type": "string", "enum": ["admin", "user"] },
         "gender": { "type": "string", "enum": ["male", "female", "other"] },
-        "aiPersonality": { "type": "string", "enum": ["cool", "romantic", "normal", "sassy", "professional"] },
+        "aiPersonality": { "type": "string", "enum": ["cool", "romantic", "normal", "sassy", "professional", "father", "guide", "brotherhood", "sisterhood"] },
         "profile": { "type": "object", "description": "Detailed profile like location, skillset, etc." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -66,6 +66,19 @@
       },
       "required": ["title", "userId", "dueDate", "status"]
     },
+    "Message": {
+      "title": "Message",
+      "description": "Individual chat messages for long-term history.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "sender": { "type": "string", "enum": ["user", "kiara"] },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "isAnalyzed": { "type": "boolean", "description": "Whether this message has been processed for knowledge extraction" }
+      },
+      "required": ["text", "sender", "timestamp", "userId"]
+    },
     "Task": {
       "title": "Task",
       "description": "An actionable item generated from a conversation.",
@@ -119,6 +132,10 @@
     "/reminders/{reminderId}": {
       "schema": "Reminder",
       "description": "User reminders and calendar events."
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Full conversation history for long-term memory."
     }
   }
 }

@@ -81,7 +81,13 @@ async function startServer() {
   });
 
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({ 
+      status: "ok", 
+      env: process.env.NODE_ENV,
+      hasKey: !!process.env.GEMINI_API_KEY,
+      keyPrefix: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.substring(0, 4) : 'none',
+      time: new Date().toISOString()
+    });
   });
 
   // Intelligence Engine API Proxy
@@ -95,31 +101,62 @@ async function startServer() {
     target: 'https://generativelanguage.googleapis.com',
     changeOrigin: true,
     ws: true,
-    pathRewrite: {
-      '^/api-proxy': '', 
+    pathRewrite: (path) => {
+      // Remove the prefix
+      let newPath = path.replace(/^\/api-proxy/, '');
+      
+      // Ensure service names use v1alpha for compatibility
+      newPath = newPath.replace(/\.v1beta\./g, '.v1alpha.');
+      newPath = newPath.replace(/\.v1\./g, '.v1alpha.');
+      
+      if (newPath.includes('/ws/')) {
+        // For WebSocket paths, the version is usually in the service name, not the path prefix
+        // e.g. /ws/google.ai.generativelanguage.v1alpha.GenerativeService/BidiGenerateContent
+        // We just need to make sure we don't have a /v1/ or /v1beta/ prefix
+        newPath = newPath.replace(/^\/v1beta\//, '/');
+        newPath = newPath.replace(/^\/v1\//, '/');
+      } else {
+        // For REST paths, ensure v1alpha prefix
+        if (newPath.startsWith('/v1beta/')) {
+          newPath = newPath.replace('/v1beta/', '/v1alpha/');
+        } else if (newPath.startsWith('/v1/')) {
+          newPath = newPath.replace('/v1/', '/v1alpha/');
+        } else if (!newPath.startsWith('/v1alpha/')) {
+          newPath = '/v1alpha' + (newPath.startsWith('/') ? newPath : '/' + newPath);
+        }
+      }
+      
+      console.log(`Proxy: Rewriting ${path} -> ${newPath}`);
+      return newPath;
     },
     on: {
       proxyReq: (proxyReq, req) => {
+        console.log(`Proxy (HTTP): Request to ${proxyReq.path}`);
         // Inject API key into the path for regular HTTP requests
         const url = new URL(proxyReq.path, 'https://generativelanguage.googleapis.com');
         const key = url.searchParams.get('key');
-        if (key === 'MY_GEMINI_API_KEY' || !key || key === 'undefined' || key === '') {
+        if (key === 'MY_GEMINI_API_KEY' || !key || key === 'undefined' || key === '' || key === 'null') {
           if (realApiKey) {
             url.searchParams.set('key', realApiKey);
             proxyReq.path = url.pathname + url.search;
             console.log(`Proxy (HTTP): Injected key for ${url.pathname}`);
+          } else {
+            console.error(`Proxy (HTTP): FAILED to inject key for ${url.pathname} - GEMINI_API_KEY is missing!`);
           }
         }
       },
       proxyReqWs: (proxyReq, req, socket, options, head) => {
+        console.log(`Proxy (WS): Incoming path: ${proxyReq.path}`);
         // Inject API key into the path for WebSocket requests
         const url = new URL(proxyReq.path, 'https://generativelanguage.googleapis.com');
         const key = url.searchParams.get('key');
-        if (key === 'MY_GEMINI_API_KEY' || !key || key === 'undefined' || key === '') {
+        if (key === 'MY_GEMINI_API_KEY' || !key || key === 'undefined' || key === '' || key === 'null') {
           if (realApiKey) {
             url.searchParams.set('key', realApiKey);
             proxyReq.path = url.pathname + url.search;
-            console.log(`Proxy (WS): Injected key for ${url.pathname}`);
+            console.log(`Proxy (WS): Rewritten path: ${proxyReq.path}`);
+          } else {
+            console.error(`Proxy (WS): FAILED to inject key - GEMINI_API_KEY is missing!`);
           }
         }
       },
@@ -153,7 +190,36 @@ async function startServer() {
   // Handle WebSocket upgrade for the proxy
   server.on('upgrade', (req, socket, head) => {
     if (req.url?.includes('/api-proxy')) {
-      console.log(`Proxy (WS Upgrade): Handling upgrade for ${req.url}`);
+      const originalUrl = req.url;
+      // Manually apply path rewrite for the upgrade request to ensure v1alpha is used
+      // This is critical because some proxy middleware implementations don't apply 
+      // pathRewrite to the upgrade request correctly.
+      let newUrl = req.url.replace(/^\/api-proxy/, '');
+      
+      // Force v1alpha for gemini-2.0 models and bidiGenerateContent
+      if (newUrl.includes('gemini-2.0') || newUrl.includes('bidiGenerateContent')) {
+        newUrl = newUrl.replace(/\.v1beta\./g, '.v1alpha.');
+        newUrl = newUrl.replace(/\.v1\./g, '.v1alpha.');
+        
+        if (newUrl.includes('/ws/')) {
+          newUrl = newUrl.replace(/^\/v1beta\//, '/');
+          newUrl = newUrl.replace(/^\/v1\//, '/');
+        } else {
+          if (newUrl.startsWith('/v1beta/')) {
+            newUrl = newUrl.replace('/v1beta/', '/v1alpha/');
+          } else if (newUrl.startsWith('/v1/')) {
+            newUrl = newUrl.replace('/v1/', '/v1alpha/');
+          } else if (!newUrl.startsWith('/v1alpha/')) {
+            newUrl = '/v1alpha' + (newUrl.startsWith('/') ? newUrl : '/' + newUrl);
+          }
+        }
+      } else if (!newUrl.match(/^\/v1/)) {
+        // Default to v1alpha if no version is present
+        newUrl = '/v1alpha' + (newUrl.startsWith('/') ? newUrl : '/' + newUrl);
+      }
+      
+      req.url = newUrl;
+      console.log(`Proxy (WS Upgrade): Rewriting ${originalUrl} -> ${req.url}`);
       (proxyMiddleware as any).upgrade(req, socket, head);
     }
   });
