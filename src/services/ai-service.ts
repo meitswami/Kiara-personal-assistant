@@ -43,8 +43,8 @@ export interface MemoryItem {
 export class AIService {
   private static ai = new GoogleGenAI({ 
     apiKey: process.env.GEMINI_API_KEY!,
-    apiVersion: "v1alpha",
-    // Always use the proxy to ensure v1alpha is forced and API keys are injected correctly
+    apiVersion: "v1beta",
+    // Always use the proxy to ensure API keys are injected correctly
     baseUrl: `${window.location.origin.replace(/\/$/, '')}/api-proxy`
   } as any);
 

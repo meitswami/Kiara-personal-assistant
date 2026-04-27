@@ -105,24 +105,20 @@ async function startServer() {
       // Remove the prefix
       let newPath = path.replace(/^\/api-proxy/, '');
       
-      // Ensure service names use v1alpha for compatibility
-      newPath = newPath.replace(/\.v1beta\./g, '.v1alpha.');
-      newPath = newPath.replace(/\.v1\./g, '.v1alpha.');
+      // Ensure service names are formatted correctly
+      // We don't force v1alpha anymore as gemini-2.0-flash is stable on v1beta
       
       if (newPath.includes('/ws/')) {
         // For WebSocket paths, the version is usually in the service name, not the path prefix
-        // e.g. /ws/google.ai.generativelanguage.v1alpha.GenerativeService/BidiGenerateContent
-        // We just need to make sure we don't have a /v1/ or /v1beta/ prefix
+        // e.g. /ws/google.ai.generativelanguage.v1beta.GenerativeService/BidiGenerateContent
+        // We just need to make sure we don't have a version prefix (v1, v1beta, v1alpha) in the path
         newPath = newPath.replace(/^\/v1beta\//, '/');
+        newPath = newPath.replace(/^\/v1alpha\//, '/');
         newPath = newPath.replace(/^\/v1\//, '/');
       } else {
-        // For REST paths, ensure v1alpha prefix
-        if (newPath.startsWith('/v1beta/')) {
-          newPath = newPath.replace('/v1beta/', '/v1alpha/');
-        } else if (newPath.startsWith('/v1/')) {
-          newPath = newPath.replace('/v1/', '/v1alpha/');
-        } else if (!newPath.startsWith('/v1alpha/')) {
-          newPath = '/v1alpha' + (newPath.startsWith('/') ? newPath : '/' + newPath);
+        // For REST paths, ensure a version prefix exists, defaulting to v1beta
+        if (!newPath.match(/^\/v1/)) {
+          newPath = '/v1beta' + (newPath.startsWith('/') ? newPath : '/' + newPath);
         }
       }
       
@@ -196,26 +192,20 @@ async function startServer() {
       // pathRewrite to the upgrade request correctly.
       let newUrl = req.url.replace(/^\/api-proxy/, '');
       
-      // Force v1alpha for gemini-2.0 models and bidiGenerateContent
+      // Handle gemini-2.0 models and bidiGenerateContent versioning
       if (newUrl.includes('gemini-2.0') || newUrl.includes('bidiGenerateContent')) {
-        newUrl = newUrl.replace(/\.v1beta\./g, '.v1alpha.');
-        newUrl = newUrl.replace(/\.v1\./g, '.v1alpha.');
-        
         if (newUrl.includes('/ws/')) {
           newUrl = newUrl.replace(/^\/v1beta\//, '/');
+          newUrl = newUrl.replace(/^\/v1alpha\//, '/');
           newUrl = newUrl.replace(/^\/v1\//, '/');
         } else {
-          if (newUrl.startsWith('/v1beta/')) {
-            newUrl = newUrl.replace('/v1beta/', '/v1alpha/');
-          } else if (newUrl.startsWith('/v1/')) {
-            newUrl = newUrl.replace('/v1/', '/v1alpha/');
-          } else if (!newUrl.startsWith('/v1alpha/')) {
-            newUrl = '/v1alpha' + (newUrl.startsWith('/') ? newUrl : '/' + newUrl);
+          if (!newUrl.match(/^\/v1/)) {
+            newUrl = '/v1beta' + (newUrl.startsWith('/') ? newUrl : '/' + newUrl);
           }
         }
       } else if (!newUrl.match(/^\/v1/)) {
-        // Default to v1alpha if no version is present
-        newUrl = '/v1alpha' + (newUrl.startsWith('/') ? newUrl : '/' + newUrl);
+        // Default to v1beta if no version is present
+        newUrl = '/v1beta' + (newUrl.startsWith('/') ? newUrl : '/' + newUrl);
       }
       
       req.url = newUrl;

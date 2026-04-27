@@ -97,7 +97,7 @@ export const KiaraUI: React.FC = () => {
   const [visualization, setVisualization] = useState<any>(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [selectedModel, setSelectedModel] = useState("gemini-2.0-flash-exp");
+  const [selectedModel, setSelectedModel] = useState("gemini-2.0-flash");
   const lastSavedMessageRef = useRef<string | null>(null);
   const [settings, setSettings] = useState({
     wakeWord: false,
@@ -926,7 +926,8 @@ export const KiaraUI: React.FC = () => {
                       onChange={(e) => setSelectedModel(e.target.value)}
                       className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:border-pink-500/50 transition-colors"
                     >
-                      <option value="gemini-2.0-flash-exp" className="bg-[#111]">Gemini 2.0 Flash (Live)</option>
+                      <option value="gemini-2.0-flash" className="bg-[#111]">Gemini 2.0 Flash (Live)</option>
+                      <option value="gemini-2.0-flash-exp" className="bg-[#111]">Gemini 2.0 Flash Exp (Legacy)</option>
                       <option value="gemini-1.5-flash" className="bg-[#111]">Gemini 1.5 Flash (Stable)</option>
                       <option value="gemini-1.5-pro" className="bg-[#111]">Gemini 1.5 Pro (Deep)</option>
                     </select>

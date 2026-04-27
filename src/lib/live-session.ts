@@ -101,7 +101,7 @@ export class LiveSession {
     
     this.ai = new GoogleGenAI({ 
       apiKey: apiKey || "MY_GEMINI_API_KEY", // Fallback to placeholder if missing, proxy will inject real one
-      apiVersion: "v1alpha",
+      apiVersion: "v1beta",
       baseUrl
     } as any);
   }
