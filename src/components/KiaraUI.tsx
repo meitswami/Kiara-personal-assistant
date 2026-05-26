@@ -16,9 +16,10 @@ import { RegistrationForm } from './RegistrationForm';
 import { LoginForm } from './LoginForm';
 import { AdminPanel } from './AdminPanel';
 import { TalkingAvatar } from './TalkingAvatar';
-import { collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, getDocs, updateDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { assistantCore } from '../lib/assistant-core';
+import { patternLearningService } from '../services/pattern-learning-service';
 
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell, AreaChart, Area } from 'recharts';
 import { WifiOff } from 'lucide-react';
@@ -111,6 +112,38 @@ export const KiaraUI: React.FC = () => {
   const liveSessionRef = useRef<LiveSession | null>(null);
   const recognitionRef = useRef<any>(null);
 
+  // Load conversation history from Firestore on login
+  useEffect(() => {
+    if (!user) return;
+    
+    const loadHistory = async () => {
+      try {
+        const historyQuery = query(
+          collection(db, 'messages'),
+          where('userId', '==', user.uid),
+          orderBy('timestamp', 'desc'),
+          limit(50)
+        );
+        const snapshot = await getDocs(historyQuery);
+        if (!snapshot.empty) {
+          const loadedMessages: Message[] = snapshot.docs
+            .map(d => ({
+              id: d.id,
+              text: d.data().text,
+              sender: d.data().sender as 'user' | 'kiara',
+              timestamp: d.data().timestamp?.toDate?.() || new Date()
+            }))
+            .reverse(); // oldest first
+          setMessages(loadedMessages);
+        }
+      } catch (err) {
+        console.warn("Failed to load message history:", err);
+      }
+    };
+    
+    loadHistory();
+  }, [user]);
+
   useEffect(() => {
     if (messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
@@ -122,8 +155,8 @@ export const KiaraUI: React.FC = () => {
       if (lastMsg.id !== lastSavedMessageRef.current) {
         lastSavedMessageRef.current = lastMsg.id;
         
-        // Every 5 messages, try to extract knowledge
-        if (messages.length % 5 === 0) {
+        // Every 3 messages, try to extract knowledge (more frequent than before)
+        if (messages.length % 3 === 0) {
           AIService.extractKnowledgeFromRecent();
         }
       }
@@ -151,8 +184,17 @@ export const KiaraUI: React.FC = () => {
       setShowInsights(false);
     };
 
+    const handleVisionError = (e: any) => {
+      addLog(`Vision Error: ${e.detail.error}`);
+      setIsVisionOn(false);
+    };
+
     window.addEventListener('kiara-visualize', handleVisualize);
-    return () => window.removeEventListener('kiara-visualize', handleVisualize);
+    window.addEventListener('kiara-vision-error', handleVisionError);
+    return () => {
+      window.removeEventListener('kiara-visualize', handleVisualize);
+      window.removeEventListener('kiara-vision-error', handleVisionError);
+    };
   }, []);
 
   useEffect(() => {
@@ -413,6 +455,9 @@ export const KiaraUI: React.FC = () => {
           if (isModel) setAudioLevel(0.2);
           console.log(`Transcription (${isModel ? 'Kiara' : 'User'}):`, text);
           
+          // Track conversation for pattern learning
+          patternLearningService.trackConversation(text, isModel ? 'kiara' : 'user');
+          
           setMessages(prev => {
             const lastMsg = prev[prev.length - 1];
             const sender = isModel ? 'kiara' : 'user';
@@ -516,6 +561,15 @@ export const KiaraUI: React.FC = () => {
   }, [isVisionOn]);
 
   const handleDisconnect = () => {
+    // Save full session transcript before disconnecting
+    if (messages.length > 0) {
+      AIService.saveSessionTranscript(messages.map(m => ({
+        text: m.text,
+        sender: m.sender,
+        timestamp: m.timestamp
+      })));
+    }
+    
     audioStreamerRef.current?.stopRecording();
     videoStreamerRef.current?.stop();
     audioStreamerRef.current?.stopPlayback();
@@ -525,6 +579,7 @@ export const KiaraUI: React.FC = () => {
     
     // Final knowledge extraction when session ends
     AIService.extractKnowledgeFromRecent();
+    AIService.resetSession();
   };
 
   const togglePower = () => {

@@ -169,15 +169,160 @@ export class AIService {
   }
 
   static async saveMessage(id: string, text: string, sender: 'user' | 'kiara'): Promise<void> {
-    if (!auth.currentUser) return;
+    if (!auth.currentUser || !text || text.trim() === '') return;
     
-    await setDoc(doc(db, 'messages', id), {
-      text,
-      sender,
-      userId: auth.currentUser.uid,
-      timestamp: serverTimestamp(),
-      isAnalyzed: false
-    });
+    try {
+      await setDoc(doc(db, 'messages', id), {
+        text,
+        sender,
+        userId: auth.currentUser.uid,
+        timestamp: serverTimestamp(),
+        isAnalyzed: false
+      });
+
+      // Also save to conversation_logs for full transcript persistence
+      await addDoc(collection(db, 'conversation_logs'), {
+        messageId: id,
+        text,
+        sender,
+        userId: auth.currentUser.uid,
+        sessionId: this.getCurrentSessionId(),
+        timestamp: serverTimestamp(),
+      });
+    } catch (err) {
+      console.warn("Failed to save message, queuing for offline sync:", err);
+      const pending = this.getPendingSync();
+      pending.push({ action: 'saveMessage', data: { id, text, sender }, timestamp: Date.now() });
+      this.setPendingSync(pending);
+    }
+  }
+
+  private static currentSessionId: string | null = null;
+
+  static getCurrentSessionId(): string {
+    if (!this.currentSessionId) {
+      this.currentSessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    }
+    return this.currentSessionId;
+  }
+
+  static resetSession(): void {
+    this.currentSessionId = null;
+  }
+
+  /**
+   * Save a full session transcript when disconnecting
+   */
+  static async saveSessionTranscript(messages: Array<{ text: string; sender: string; timestamp: Date }>): Promise<void> {
+    if (!auth.currentUser || messages.length === 0) return;
+
+    const transcript = messages.map(m => `[${m.sender}]: ${m.text}`).join('\n');
+    
+    try {
+      await addDoc(collection(db, 'session_transcripts'), {
+        userId: auth.currentUser.uid,
+        sessionId: this.getCurrentSessionId(),
+        transcript,
+        messageCount: messages.length,
+        startTime: messages[0]?.timestamp || new Date(),
+        endTime: messages[messages.length - 1]?.timestamp || new Date(),
+        createdAt: serverTimestamp(),
+        isAnalyzed: false,
+      });
+
+      // Auto-analyze the full session for knowledge extraction
+      await this.extractKnowledgeFromTranscript(transcript);
+    } catch (err) {
+      console.error("Failed to save session transcript:", err);
+    }
+  }
+
+  /**
+   * Extract knowledge from a complete transcript (more thorough than incremental)
+   */
+  static async extractKnowledgeFromTranscript(transcript: string): Promise<void> {
+    if (!auth.currentUser || !this.isOnline() || !transcript.trim()) return;
+
+    try {
+      const response = await this.ai.models.generateContent({
+        model: "gemini-1.5-flash",
+        contents: `You are an AI knowledge extractor. Analyze this FULL conversation transcript and extract ALL important information to store in long-term memory.
+
+Extract:
+- Personal facts about the user (preferences, habits, relationships, opinions)
+- Action items and tasks mentioned
+- Ideas and plans discussed
+- Important dates, deadlines, and commitments
+- Communication patterns (how the user likes to be addressed, their mood patterns)
+- Any explicitly requested memorization ("remember this", "note this down", etc.)
+
+If there is nothing important, return an empty array for 'memories'.
+
+Transcript:
+${transcript}`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              memories: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    content: { type: Type.STRING },
+                    type: { type: Type.STRING, enum: ["meeting", "idea", "task", "note", "personal"] },
+                    priority: { type: Type.STRING, enum: ["low", "medium", "high"] },
+                    structuredData: { type: Type.OBJECT },
+                    tags: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["content", "type", "priority", "structuredData"]
+                }
+              },
+              userPatterns: {
+                type: Type.OBJECT,
+                properties: {
+                  communicationStyle: { type: Type.STRING },
+                  topicsOfInterest: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  preferredLanguage: { type: Type.STRING },
+                  moodIndicators: { type: Type.ARRAY, items: { type: Type.STRING } }
+                }
+              }
+            },
+            required: ["memories"]
+          }
+        }
+      });
+
+      const { memories, userPatterns } = JSON.parse(response.text);
+      
+      for (const memory of memories) {
+        const embedResult = await this.ai.models.embedContent({
+          model: "text-embedding-004",
+          contents: [memory.content],
+        });
+        const embedding = embedResult.embeddings[0].values;
+
+        await addDoc(collection(db, 'memories'), {
+          ...memory,
+          embedding,
+          userId: auth.currentUser.uid,
+          source: 'session_extraction',
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      // Store user patterns if extracted
+      if (userPatterns) {
+        await setDoc(doc(db, 'user_patterns', auth.currentUser.uid), {
+          ...userPatterns,
+          lastUpdated: serverTimestamp(),
+          userId: auth.currentUser.uid,
+        }, { merge: true });
+      }
+    } catch (err) {
+      console.error("Failed to extract knowledge from transcript:", err);
+    }
   }
 
   static async extractKnowledgeFromRecent(): Promise<void> {

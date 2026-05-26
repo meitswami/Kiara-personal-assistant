@@ -77,6 +77,50 @@ const createVisualizationTool: FunctionDeclaration = {
   }
 };
 
+const sendWhatsAppTool: FunctionDeclaration = {
+  name: "sendWhatsApp",
+  description: "Send a WhatsApp message to a contact. Use when user asks to message someone via WhatsApp.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      to: { type: Type.STRING, description: "Phone number with country code (e.g. +919876543210)" },
+      message: { type: Type.STRING, description: "The message to send" }
+    },
+    required: ["to", "message"]
+  }
+};
+
+const composeEmailTool: FunctionDeclaration = {
+  name: "composeEmail",
+  description: "Compose and send an email. Use when user asks to send or draft an email.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      to: { type: Type.STRING, description: "Recipient email address" },
+      subject: { type: Type.STRING, description: "Email subject" },
+      body: { type: Type.STRING, description: "Email body content" },
+      sendImmediately: { type: Type.BOOLEAN, description: "If true, send right away. If false, save as draft for review." }
+    },
+    required: ["to", "subject", "body"]
+  }
+};
+
+const createReminderTool: FunctionDeclaration = {
+  name: "createReminder",
+  description: "Create a reminder or calendar event. Use when user mentions deadlines, meetings, or things to remember at a specific time.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      title: { type: Type.STRING, description: "Title of the reminder" },
+      description: { type: Type.STRING, description: "Description or details" },
+      dueDate: { type: Type.STRING, description: "ISO 8601 date-time string for when the reminder is due" },
+      priority: { type: Type.STRING, enum: ["low", "medium", "high"], description: "Priority level" },
+      syncToCalendar: { type: Type.BOOLEAN, description: "Whether to sync to Google Calendar" }
+    },
+    required: ["title", "dueDate"]
+  }
+};
+
 export interface LiveSessionConfig {
   gender?: string;
   personality?: string;
@@ -173,16 +217,32 @@ export class LiveSession {
     2. CALL ANALYSIS: You can analyze mobile call transcripts and extract reminders.
     3. ERP INTEGRATION: You can create tasks and manage team data.
     4. VISION: You can see through the user's camera. 
-       - CRITICAL: When Vision is enabled, you receive high-resolution video frames. You MUST be extremely precise in identifying objects. 
-       - VISUAL REASONING: Before identifying an object, mentally analyze its geometric properties. 
+       - CRITICAL: When Vision is enabled, you receive high-resolution video frames at 1 frame per second. You MUST be extremely precise in identifying objects. 
+       - ACTIVE ACKNOWLEDGMENT: When the user asks "what do you see?" or similar, ALWAYS describe what is in the current frame in detail. Never say "I can't see" unless Vision is explicitly disabled.
+       - GEOMETRIC REASONING: Before identifying an object, mentally analyze its geometric properties. 
        - A computer mouse has a low profile, curved top, and usually a wire or optical sensor on the bottom. 
        - A Pepsi can is a perfect cylinder, usually 12oz size, with a metallic sheen and specific branding colors (Blue, Red, White).
        - If you see a handheld device with buttons, it is likely a mouse or remote, NOT a beverage container.
        - Always provide descriptive feedback: "I see a sleek, black optical mouse on your desk" rather than just "I see a mouse."
+       - PROACTIVE OBSERVATIONS: Occasionally mention what you see without being asked if something interesting or relevant appears.
+       - COLOR & DETAIL: Always mention colors, positions, and context (what's on the desk, background, lighting).
+       - If the frame is dark or unclear, say so: "The image is a bit dark, but I can make out..."
        - You MUST acknowledge what you see if the user asks.
     5. VISUALIZATION: You can build dashboards and charts.
        - If the user asks to "visualize" or "show a chart" of their ideas, projects, or data, use the 'createVisualization' tool.
        - You can combine this with 'searchMemory' to get the data first.
+    6. WHATSAPP: You can send WhatsApp messages using the 'sendWhatsApp' tool.
+       - When the user says "send a WhatsApp to..." or "message X on WhatsApp", use this tool.
+       - Ask for confirmation before sending if the message content is sensitive.
+    7. EMAIL: You can compose and send emails using the 'composeEmail' tool.
+       - When the user says "send an email to..." or "compose an email", use this tool.
+       - Match the user's typical email style and tone based on what you've learned.
+       - Ask for confirmation before sending important emails.
+    8. REMINDERS & CALENDAR: You can create reminders and sync them to Google Calendar using the 'createReminder' tool.
+       - When the user mentions deadlines, meetings, or things to remember at a specific time, proactively offer to create a reminder.
+       - Always calculate the exact ISO 8601 timestamp for the reminder.
+    9. PATTERN LEARNING: You continuously learn the user's patterns - communication style, scheduling habits, work focus areas.
+       - Use this knowledge to provide personalized suggestions and match their style.
     
     PERSONALITY:
     ${personalityInstruction}
@@ -313,6 +373,132 @@ export class LiveSession {
                       id: call.id
                     }]
                   });
+                } else if (call.name === "sendWhatsApp") {
+                  const args = call.args as any;
+                  console.log(`Kiara sending WhatsApp to ${args.to}: ${args.message}`);
+                  
+                  try {
+                    const response = await fetch(`${window.location.origin}/api/whatsapp/send`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ to: args.to, body: args.message, userId: 'current' })
+                    });
+                    const data = await response.json();
+                    
+                    const session = await sessionPromise;
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        name: "sendWhatsApp",
+                        response: data.success 
+                          ? { success: true, message: `WhatsApp sent to ${args.to}` }
+                          : { success: false, error: data.error || "WhatsApp not configured. Please set up Twilio credentials." },
+                        id: call.id
+                      }]
+                    });
+                  } catch (err: any) {
+                    const session = await sessionPromise;
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        name: "sendWhatsApp",
+                        response: { success: false, error: err.message },
+                        id: call.id
+                      }]
+                    });
+                  }
+                } else if (call.name === "composeEmail") {
+                  const args = call.args as any;
+                  console.log(`Kiara composing email to ${args.to}: ${args.subject}`);
+                  
+                  try {
+                    const endpoint = args.sendImmediately ? '/api/gmail/send' : '/api/gmail/send';
+                    const response = await fetch(`${window.location.origin}${endpoint}`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ 
+                        to: [args.to], 
+                        subject: args.subject, 
+                        body: args.body,
+                        userId: 'current' 
+                      })
+                    });
+                    const data = await response.json();
+                    
+                    const session = await sessionPromise;
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        name: "composeEmail",
+                        response: data.success 
+                          ? { success: true, message: `Email sent to ${args.to}` }
+                          : { success: false, error: data.error || "Gmail not connected. Please connect your Gmail first." },
+                        id: call.id
+                      }]
+                    });
+                  } catch (err: any) {
+                    const session = await sessionPromise;
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        name: "composeEmail",
+                        response: { success: false, error: err.message },
+                        id: call.id
+                      }]
+                    });
+                  }
+                } else if (call.name === "createReminder") {
+                  const args = call.args as any;
+                  console.log(`Kiara creating reminder: ${args.title} at ${args.dueDate}`);
+                  
+                  try {
+                    // Store reminder in Firestore
+                    const { addDoc, collection, serverTimestamp } = await import('firebase/firestore');
+                    const { db, auth } = await import('../lib/firebase');
+                    
+                    const reminderData: any = {
+                      title: args.title,
+                      description: args.description || '',
+                      dueDate: args.dueDate,
+                      priority: args.priority || 'medium',
+                      source: 'voice',
+                      status: 'pending',
+                      userId: auth.currentUser?.uid || 'unknown',
+                      createdAt: serverTimestamp(),
+                      integrationStatus: {
+                        googleCalendar: args.syncToCalendar ? 'pending' : 'skipped'
+                      }
+                    };
+                    
+                    await addDoc(collection(db, 'reminders'), reminderData);
+
+                    // If sync to calendar requested, try it
+                    if (args.syncToCalendar) {
+                      try {
+                        await fetch(`${window.location.origin}/api/calendar/sync-reminder`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ userId: auth.currentUser?.uid, reminder: { title: args.title, description: args.description, dueDate: args.dueDate } })
+                        });
+                      } catch (calErr) {
+                        console.warn("Calendar sync failed (non-critical):", calErr);
+                      }
+                    }
+                    
+                    const session = await sessionPromise;
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        name: "createReminder",
+                        response: { success: true, message: `Reminder "${args.title}" created for ${args.dueDate}${args.syncToCalendar ? ' and synced to Google Calendar' : ''}` },
+                        id: call.id
+                      }]
+                    });
+                  } catch (err: any) {
+                    const session = await sessionPromise;
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        name: "createReminder",
+                        response: { success: false, error: err.message },
+                        id: call.id
+                      }]
+                    });
+                  }
                 }
               }
             }
@@ -344,7 +530,7 @@ export class LiveSession {
             voiceConfig: { prebuiltVoiceConfig: { voiceName } },
           },
           systemInstruction,
-          tools: [{ functionDeclarations: [openWebsiteTool, searchMemoryTool, createVisualizationTool] }],
+          tools: [{ functionDeclarations: [openWebsiteTool, searchMemoryTool, createVisualizationTool, sendWhatsAppTool, composeEmailTool, createReminderTool] }],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
         },
@@ -372,7 +558,8 @@ export class LiveSession {
           video: { data: base64Data, mimeType: "image/jpeg" },
         });
       } catch (err) {
-        // Ignore send errors during state transitions
+        console.warn("Vision frame send failed (non-critical):", err);
+        // Don't throw - vision frame drops are acceptable
       }
     }
   }

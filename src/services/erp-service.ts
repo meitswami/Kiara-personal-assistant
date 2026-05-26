@@ -38,10 +38,10 @@ class ERPService {
   private token: string;
 
   constructor() {
-    this.baseUrl = import.meta.env.VITE_ERP_API_URL || '';
-    this.apiKey = import.meta.env.VITE_ERP_API_KEY || '';
-    this.apiSecret = import.meta.env.VITE_ERP_API_SECRET || '';
-    this.token = import.meta.env.VITE_ERP_AUTH_TOKEN || '';
+    this.baseUrl = import.meta.env.VITE_ERP_API_URL || (process.env as any).VITE_ERP_API_URL || '';
+    this.apiKey = import.meta.env.VITE_ERP_API_KEY || (process.env as any).VITE_ERP_API_KEY || '';
+    this.apiSecret = import.meta.env.VITE_ERP_API_SECRET || (process.env as any).VITE_ERP_API_SECRET || '';
+    this.token = import.meta.env.VITE_ERP_AUTH_TOKEN || (process.env as any).VITE_ERP_AUTH_TOKEN || '';
   }
 
   private get headers() {

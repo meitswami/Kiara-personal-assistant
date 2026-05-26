@@ -9,6 +9,10 @@ export default defineConfig(({mode}) => {
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      'process.env.VITE_ERP_API_URL': JSON.stringify(env.VITE_ERP_API_URL || env.ERP_API_URL || ''),
+      'process.env.VITE_ERP_API_KEY': JSON.stringify(env.VITE_ERP_API_KEY || env.ERP_API_KEY || ''),
+      'process.env.VITE_ERP_API_SECRET': JSON.stringify(env.VITE_ERP_API_SECRET || env.ERP_API_SECRET || ''),
+      'process.env.VITE_ERP_AUTH_TOKEN': JSON.stringify(env.VITE_ERP_AUTH_TOKEN || env.ERP_AUTH_TOKEN || ''),
     },
     resolve: {
       alias: {
@@ -17,7 +21,7 @@ export default defineConfig(({mode}) => {
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // Do not modify - file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
     },
   };
