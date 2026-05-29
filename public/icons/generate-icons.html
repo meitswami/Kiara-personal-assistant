@@ -1,0 +1,36 @@
+<!-- 
+  Open this file in a browser to generate PWA icons.
+  For now, the app uses a simple pink circle with K as placeholder.
+  Replace these with your actual Kiara logo later.
+-->
+<script>
+const sizes = [72, 96, 128, 144, 152, 192, 384, 512];
+sizes.forEach(size => {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  
+  // Background
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, size, size);
+  
+  // Pink circle
+  ctx.beginPath();
+  ctx.arc(size/2, size/2, size*0.4, 0, Math.PI*2);
+  ctx.fillStyle = '#ec4899';
+  ctx.fill();
+  
+  // K letter
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${size*0.4}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('K', size/2, size/2);
+  
+  const link = document.createElement('a');
+  link.download = `icon-${size}x${size}.png`;
+  link.href = canvas.toDataURL();
+  link.click();
+});
+</script>
