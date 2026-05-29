@@ -2,12 +2,82 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>KIARA - Personal Assistant Intelligent System</title>
+    
+    <!-- PWA Meta Tags -->
+    <meta name="theme-color" content="#ec4899" />
+    <meta name="background-color" content="#050505" />
+    <meta name="description" content="Your AI-powered personal assistant with voice, vision, memory, WhatsApp, Email, and Calendar integrations" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Kiara" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="Kiara" />
+    <meta name="msapplication-TileColor" content="#ec4899" />
+    <meta name="msapplication-tap-highlight" content="no" />
+    <meta name="format-detection" content="telephone=no" />
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- Icons -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-96x96.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-192x192.png" />
+    <link rel="apple-touch-icon" sizes="152x152" href="/icons/icon-152x152.png" />
+    <link rel="apple-touch-icon" sizes="144x144" href="/icons/icon-144x144.png" />
+    <link rel="apple-touch-icon" sizes="120x120" href="/icons/icon-128x128.png" />
+    
+    <!-- Splash screens for iOS -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    
+    <!-- Preconnect for performance -->
+    <link rel="preconnect" href="https://generativelanguage.googleapis.com" />
+    <link rel="preconnect" href="https://firestore.googleapis.com" />
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    
+    <!-- Register Service Worker -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(reg => {
+              console.log('[App] Service Worker registered:', reg.scope);
+              
+              // Check for updates periodically
+              setInterval(() => reg.update(), 60 * 60 * 1000); // Every hour
+            })
+            .catch(err => console.error('[App] SW registration failed:', err));
+        });
+      }
+      
+      // Handle PWA install prompt
+      let deferredPrompt;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        window.dispatchEvent(new CustomEvent('kiara-install-available'));
+      });
+      
+      window.addEventListener('appinstalled', () => {
+        deferredPrompt = null;
+        console.log('[App] PWA installed');
+      });
+      
+      // Expose install trigger
+      window.installKiara = () => {
+        if (deferredPrompt) {
+          deferredPrompt.prompt();
+          deferredPrompt.userChoice.then(choice => {
+            console.log('[App] Install choice:', choice.outcome);
+            deferredPrompt = null;
+          });
+        }
+      };
+    </script>
   </body>
 </html>
-

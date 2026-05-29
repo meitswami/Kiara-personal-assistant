@@ -897,6 +897,880 @@ Return JSON with:
     }
   });
 
+  // ============ Push Notifications (Web Push / VAPID) ============
+
+  // Generate VAPID keys: npx web-push generate-vapid-keys
+  const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+  const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+  const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:meit2swami@gmail.com';
+
+  // Get VAPID public key for client subscription
+  app.get("/api/push/vapid-key", (req, res) => {
+    res.json({ publicKey: VAPID_PUBLIC_KEY });
+  });
+
+  // Subscribe to push notifications
+  app.post("/api/push/subscribe", async (req, res) => {
+    const { subscription, userId } = req.body;
+    if (!subscription || !userId) {
+      return res.status(400).json({ error: "Missing subscription or userId" });
+    }
+
+    try {
+      await db.collection('push_subscriptions').doc(userId).set({
+        ...subscription,
+        userId,
+        createdAt: new Date(),
+        platform: req.headers['user-agent']
+      }, { merge: true });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Unsubscribe
+  app.post("/api/push/unsubscribe", async (req, res) => {
+    const { userId } = req.body;
+    try {
+      await db.collection('push_subscriptions').doc(userId).delete();
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Send push notification to a user (internal API)
+  app.post("/api/push/send", async (req, res) => {
+    const { userId, title, body, data, tag } = req.body;
+
+    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+      return res.status(503).json({ success: false, error: "Push notifications not configured. Generate VAPID keys." });
+    }
+
+    try {
+      const subDoc = await db.collection('push_subscriptions').doc(userId).get();
+      if (!subDoc.exists) {
+        return res.status(404).json({ success: false, error: "User not subscribed to push" });
+      }
+
+      const subscription = subDoc.data();
+
+      // Use web-push library (dynamic import for ESM)
+      const webpush = await import('web-push');
+      webpush.default.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+
+      await webpush.default.sendNotification(
+        { endpoint: subscription!.endpoint, keys: subscription!.keys },
+        JSON.stringify({ title, body, tag, data, icon: '/icons/icon-192x192.png' })
+      );
+
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Push send error:", error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // ============ Telegram Bot Integration ============
+
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+  const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+
+  // Generate a connect link for user to link their Telegram
+  app.post("/api/telegram/connect-link", async (req, res) => {
+    const { userId } = req.body;
+    if (!TELEGRAM_BOT_TOKEN) {
+      return res.status(503).json({ error: "Telegram bot not configured. Set TELEGRAM_BOT_TOKEN." });
+    }
+
+    // Generate a unique connection code
+    const code = `kiara_${userId.substring(0, 8)}_${Date.now().toString(36)}`;
+    
+    // Store the pending connection
+    await db.collection('telegram_pending').doc(code).set({
+      userId,
+      code,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 min expiry
+    });
+
+    // Get bot username
+    let botUsername = 'KiaraAssistantBot';
+    try {
+      const meResponse = await fetch(`${TELEGRAM_API}/getMe`);
+      const meData = await meResponse.json();
+      if (meData.ok) botUsername = meData.result.username;
+    } catch {}
+
+    res.json({
+      url: `https://t.me/${botUsername}?start=${code}`,
+      botUsername,
+      code
+    });
+  });
+
+  // Telegram webhook (receives messages from Telegram)
+  app.post("/api/telegram/webhook", async (req, res) => {
+    const update = req.body;
+
+    try {
+      if (update.message) {
+        const msg = update.message;
+        const chatId = msg.chat.id;
+        const text = msg.text || '';
+
+        // Handle /start command with connection code
+        if (text.startsWith('/start kiara_')) {
+          const code = text.replace('/start ', '');
+          const pendingDoc = await db.collection('telegram_pending').doc(code).get();
+          
+          if (pendingDoc.exists) {
+            const { userId } = pendingDoc.data()!;
+            
+            // Save Telegram config
+            await db.collection('telegram_config').doc(userId).set({
+              chatId: chatId.toString(),
+              botUsername: msg.from?.username || '',
+              isConnected: true,
+              notifyReminders: true,
+              notifyWhatsApp: true,
+              notifyEmail: true,
+              notifyCalendar: true,
+              notifyPatternInsights: true,
+              phoneCommandsEnabled: true,
+              telegramUserId: msg.from?.id,
+              telegramFirstName: msg.from?.first_name,
+              connectedAt: new Date()
+            });
+
+            // Clean up pending
+            await db.collection('telegram_pending').doc(code).delete();
+
+            // Send welcome message
+            await sendTelegramMessage(chatId, `🎉 *Kiara Connected!*\n\nHey ${msg.from?.first_name}! I'm now linked to your Kiara assistant.\n\n*What I can do:*\n📱 Control your phone remotely\n⏰ Forward reminders\n💬 Forward WhatsApp messages\n📧 Forward email notifications\n🧠 Answer questions from your memory\n\nType /help to see all commands.`);
+          } else {
+            await sendTelegramMessage(chatId, '❌ Invalid or expired connection code. Please generate a new link from Kiara settings.');
+          }
+          res.sendStatus(200);
+          return;
+        }
+
+        // Find user by chatId
+        const configSnapshot = await db.collection('telegram_config').where('chatId', '==', chatId.toString()).get();
+        if (configSnapshot.empty) {
+          await sendTelegramMessage(chatId, '⚠️ Not connected. Please connect via the Kiara app settings first.');
+          res.sendStatus(200);
+          return;
+        }
+
+        const userId = configSnapshot.docs[0].id;
+        const config = configSnapshot.docs[0].data();
+
+        // Route commands
+        if (text.startsWith('/')) {
+          await handleTelegramCommand(chatId, userId, text, config);
+        } else {
+          // Treat as a question to Kiara
+          await handleTelegramAsk(chatId, userId, text);
+        }
+      }
+    } catch (error) {
+      console.error("Telegram webhook error:", error);
+    }
+
+    res.sendStatus(200);
+  });
+
+  // Send notification to user's Telegram
+  app.post("/api/telegram/notify", async (req, res) => {
+    const { userId, message, parse_mode } = req.body;
+
+    try {
+      const configDoc = await db.collection('telegram_config').doc(userId).get();
+      if (!configDoc.exists || !configDoc.data()?.isConnected) {
+        return res.json({ success: false, error: "Telegram not connected" });
+      }
+
+      const chatId = configDoc.data()!.chatId;
+      await sendTelegramMessage(chatId, message, parse_mode || 'Markdown');
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Phone command via Telegram
+  app.post("/api/telegram/phone-command", async (req, res) => {
+    const { userId, command, params } = req.body;
+
+    try {
+      // Store command in Firestore for companion app to pick up
+      const cmdRef = await db.collection('phone_commands').add({
+        command,
+        params: params || {},
+        status: 'pending',
+        userId,
+        source: 'telegram',
+        createdAt: new Date()
+      });
+
+      // Also send notification to companion app via FCM if configured
+      // (FCM setup would be separate)
+
+      res.json({ success: true, commandId: cmdRef.id });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Disconnect Telegram
+  app.post("/api/telegram/disconnect", async (req, res) => {
+    const { userId } = req.body;
+    try {
+      const configDoc = await db.collection('telegram_config').doc(userId).get();
+      if (configDoc.exists) {
+        const chatId = configDoc.data()!.chatId;
+        await sendTelegramMessage(chatId, '👋 Kiara has been disconnected from this Telegram account. You can reconnect anytime from the app.');
+      }
+      await db.collection('telegram_config').doc(userId).update({ isConnected: false });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Set Telegram webhook URL (call this once during setup)
+  app.post("/api/telegram/set-webhook", async (req, res) => {
+    if (!TELEGRAM_BOT_TOKEN) {
+      return res.status(503).json({ error: "Bot token not configured" });
+    }
+
+    const webhookUrl = `${process.env.APP_URL || req.protocol + '://' + req.get('host')}/api/telegram/webhook`;
+    
+    try {
+      const response = await fetch(`${TELEGRAM_API}/setWebhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: webhookUrl })
+      });
+      const data = await response.json();
+      res.json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Helper: Send Telegram message
+  async function sendTelegramMessage(chatId: string | number, text: string, parseMode: string = 'Markdown'): Promise<void> {
+    if (!TELEGRAM_BOT_TOKEN) return;
+
+    await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: parseMode,
+        disable_web_page_preview: true
+      })
+    });
+  }
+
+  // Helper: Handle Telegram commands
+  async function handleTelegramCommand(chatId: string | number, userId: string, text: string, config: any): Promise<void> {
+    const parts = text.split(' ');
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ');
+
+    switch (cmd) {
+      case '/help':
+        await sendTelegramMessage(chatId, `📋 *Kiara Commands*\n\n*Phone Control:*\n/call +91... - Make a call\n/sms +91... message - Send SMS\n/volume 50 - Set volume (0-100)\n/silent - Silent mode\n/ring - Find my phone\n/battery - Check battery\n/location - Get location\n/flashlight - Toggle flashlight\n/dnd - Do Not Disturb\n/wifi - Toggle WiFi\n/bluetooth - Toggle BT\n/openapp AppName - Open app\n\n*Assistant:*\n/ask question - Ask Kiara\n/remember text - Save to memory\n/search query - Search memories\n/remind text - Set reminder\n/whatsapp +91... msg - Send WhatsApp\n/email addr Subject | Body - Send email\n/status - System status\n/insights - Pattern insights\n\n*Settings:*\n/settings - View settings\n/mute - Mute 1hr\n/unmute - Unmute\n/disconnect - Disconnect`);
+        break;
+
+      case '/call':
+        if (!args) { await sendTelegramMessage(chatId, '❌ Usage: /call +919876543210'); return; }
+        await db.collection('phone_commands').add({ command: 'CALL', params: { phoneNumber: args }, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, `📞 Calling ${args}...`);
+        break;
+
+      case '/sms': {
+        const smsMatch = args.match(/^(\+?\d+)\s+(.+)$/);
+        if (!smsMatch) { await sendTelegramMessage(chatId, '❌ Usage: /sms +919876543210 Hello!'); return; }
+        await db.collection('phone_commands').add({ command: 'SMS', params: { phoneNumber: smsMatch[1], message: smsMatch[2] }, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, `📱 SMS sent to ${smsMatch[1]}`);
+        break;
+      }
+
+      case '/volume':
+        const vol = parseInt(args);
+        if (isNaN(vol)) { await sendTelegramMessage(chatId, '❌ Usage: /volume 50'); return; }
+        await db.collection('phone_commands').add({ command: 'SET_VOLUME', params: { level: vol }, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, `🔊 Volume set to ${vol}%`);
+        break;
+
+      case '/silent':
+        await db.collection('phone_commands').add({ command: 'SILENT_MODE', params: { enabled: true }, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '🔇 Silent mode enabled');
+        break;
+
+      case '/ring':
+        await db.collection('phone_commands').add({ command: 'RING_PHONE', params: { duration: 30 }, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '🔔 Ringing your phone...');
+        break;
+
+      case '/battery':
+        await db.collection('phone_commands').add({ command: 'GET_BATTERY', params: {}, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '🔋 Checking battery...');
+        break;
+
+      case '/location':
+        await db.collection('phone_commands').add({ command: 'GET_LOCATION', params: {}, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '📍 Getting location...');
+        break;
+
+      case '/flashlight':
+        await db.collection('phone_commands').add({ command: 'TOGGLE_FLASHLIGHT', params: {}, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '🔦 Toggling flashlight...');
+        break;
+
+      case '/dnd':
+        await db.collection('phone_commands').add({ command: 'TOGGLE_DND', params: {}, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '🌙 Toggling Do Not Disturb...');
+        break;
+
+      case '/wifi':
+        await db.collection('phone_commands').add({ command: 'TOGGLE_WIFI', params: {}, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '📶 Toggling WiFi...');
+        break;
+
+      case '/bluetooth':
+        await db.collection('phone_commands').add({ command: 'TOGGLE_BLUETOOTH', params: {}, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, '🔵 Toggling Bluetooth...');
+        break;
+
+      case '/openapp':
+        if (!args) { await sendTelegramMessage(chatId, '❌ Usage: /openapp WhatsApp'); return; }
+        await db.collection('phone_commands').add({ command: 'OPEN_APP', params: { appName: args }, status: 'pending', userId, source: 'telegram', createdAt: new Date() });
+        await sendTelegramMessage(chatId, `📱 Opening ${args}...`);
+        break;
+
+      case '/ask':
+        if (!args) { await sendTelegramMessage(chatId, '❌ Usage: /ask What meetings do I have?'); return; }
+        await handleTelegramAsk(chatId, userId, args);
+        break;
+
+      case '/remember':
+        if (!args) { await sendTelegramMessage(chatId, '❌ Usage: /remember Important fact to save'); return; }
+        await db.collection('memories').add({
+          content: args,
+          type: 'note',
+          priority: 'medium',
+          structuredData: {},
+          rawText: args,
+          userId,
+          source: 'telegram',
+          createdAt: new Date()
+        });
+        await sendTelegramMessage(chatId, `🧠 Memorized: "${args}"`);
+        break;
+
+      case '/status':
+        const statusDoc = await db.collection('device_status').doc(userId).get();
+        if (statusDoc.exists) {
+          const s = statusDoc.data()!;
+          await sendTelegramMessage(chatId, `📊 *Device Status*\n\n🔋 Battery: ${s.battery}%${s.isCharging ? ' ⚡' : ''}\n📶 WiFi: ${s.wifiConnected ? '✅' : '❌'}\n🔵 BT: ${s.bluetoothEnabled ? '✅' : '❌'}\n🔊 Volume: ${s.volume}%\n🌙 DND: ${s.isDND ? '✅' : '❌'}\n📱 ${s.deviceName}\n🕐 Last seen: ${new Date(s.lastSeen).toLocaleString()}`);
+        } else {
+          await sendTelegramMessage(chatId, '❌ No device status. Is the companion app running?');
+        }
+        break;
+
+      case '/settings':
+        await sendTelegramMessage(chatId, `⚙️ *Notification Settings*\n\n⏰ Reminders: ${config.notifyReminders ? '✅' : '❌'}\n💬 WhatsApp: ${config.notifyWhatsApp ? '✅' : '❌'}\n📧 Email: ${config.notifyEmail ? '✅' : '❌'}\n📅 Calendar: ${config.notifyCalendar ? '✅' : '❌'}\n💡 Insights: ${config.notifyPatternInsights ? '✅' : '❌'}\n📱 Phone Cmds: ${config.phoneCommandsEnabled ? '✅' : '❌'}\n\nUse /mute or /unmute to control.`);
+        break;
+
+      case '/mute':
+        await db.collection('telegram_config').doc(userId).update({ mutedUntil: new Date(Date.now() + 60 * 60 * 1000) });
+        await sendTelegramMessage(chatId, '🔇 Notifications muted for 1 hour.');
+        break;
+
+      case '/unmute':
+        await db.collection('telegram_config').doc(userId).update({ mutedUntil: null });
+        await sendTelegramMessage(chatId, '🔔 Notifications unmuted.');
+        break;
+
+      case '/disconnect':
+        await db.collection('telegram_config').doc(userId).update({ isConnected: false });
+        await sendTelegramMessage(chatId, '👋 Disconnected. Reconnect anytime from Kiara.');
+        break;
+
+      default:
+        await sendTelegramMessage(chatId, `❓ Unknown command. Type /help to see available commands.`);
+    }
+  }
+
+  // Helper: Handle free-text questions via AI
+  async function handleTelegramAsk(chatId: string | number, userId: string, question: string): Promise<void> {
+    if (!realApiKey) {
+      await sendTelegramMessage(chatId, '❌ AI not configured.');
+      return;
+    }
+
+    try {
+      await sendTelegramMessage(chatId, '🤔 Thinking...');
+
+      // Get user's memories for context
+      const memoriesSnapshot = await db.collection('memories')
+        .where('userId', '==', userId)
+        .orderBy('createdAt', 'desc')
+        .limit(10)
+        .get();
+
+      const context = memoriesSnapshot.docs.map(d => d.data().content).join('\n');
+
+      const aiResponse = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${realApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `You are Kiara, a personal AI assistant responding via Telegram. Be concise but helpful.
+
+User's Memory Context:
+${context || 'No memories yet.'}
+
+User Question: ${question}
+
+Answer concisely:` }] }]
+          })
+        }
+      );
+
+      const aiData = await aiResponse.json();
+      const answer = aiData.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't process that. Try again?";
+
+      await sendTelegramMessage(chatId, `💬 ${answer}`);
+    } catch (error) {
+      await sendTelegramMessage(chatId, '❌ Error processing your question. Please try again.');
+    }
+  }
+
+  // ============ Outlook (Microsoft Graph) Integration ============
+
+  const OUTLOOK_CLIENT_ID = process.env.OUTLOOK_CLIENT_ID;
+  const OUTLOOK_CLIENT_SECRET = process.env.OUTLOOK_CLIENT_SECRET;
+  const OUTLOOK_REDIRECT_URI = process.env.OUTLOOK_REDIRECT_URI || `http://localhost:${PORT}/api/outlook/callback`;
+  const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
+
+  const OUTLOOK_SCOPES = [
+    'offline_access',
+    'User.Read',
+    'Mail.Read',
+    'Mail.Send',
+    'Mail.ReadWrite',
+    'Calendars.ReadWrite',
+  ];
+
+  // Get OAuth URL for Outlook connection
+  app.get("/api/outlook/auth-url", (req, res) => {
+    if (!OUTLOOK_CLIENT_ID || !OUTLOOK_CLIENT_SECRET) {
+      return res.status(503).json({
+        error: "Outlook integration not configured. Set OUTLOOK_CLIENT_ID and OUTLOOK_CLIENT_SECRET."
+      });
+    }
+
+    const userId = req.query.userId as string;
+    const params = new URLSearchParams({
+      client_id: OUTLOOK_CLIENT_ID,
+      response_type: 'code',
+      redirect_uri: OUTLOOK_REDIRECT_URI,
+      response_mode: 'query',
+      scope: OUTLOOK_SCOPES.join(' '),
+      state: userId,
+      prompt: 'consent'
+    });
+
+    res.json({
+      url: `https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/authorize?${params}`
+    });
+  });
+
+  // OAuth callback - exchanges code for tokens
+  app.get("/api/outlook/callback", async (req, res) => {
+    const { code, state: userId, error: oauthError, error_description } = req.query;
+
+    if (oauthError) {
+      return res.status(400).send(`<html><body><h2>Outlook OAuth Error</h2><p>${oauthError}: ${error_description}</p><script>setTimeout(() => window.close(), 5000);</script></body></html>`);
+    }
+    if (!code || !userId) {
+      return res.status(400).send("Missing authorization code or user ID");
+    }
+
+    try {
+      const tokenResponse = await fetch(`https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code: code as string,
+          client_id: OUTLOOK_CLIENT_ID!,
+          client_secret: OUTLOOK_CLIENT_SECRET!,
+          redirect_uri: OUTLOOK_REDIRECT_URI,
+          grant_type: 'authorization_code',
+          scope: OUTLOOK_SCOPES.join(' ')
+        }).toString()
+      });
+
+      const tokens = await tokenResponse.json();
+
+      if (tokens.error) {
+        return res.status(400).send(`OAuth Error: ${tokens.error_description}`);
+      }
+
+      // Fetch user profile to get email address
+      const profileResponse = await fetch('https://graph.microsoft.com/v1.0/me', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` }
+      });
+      const profile = await profileResponse.json();
+
+      // Store tokens
+      await db.collection('outlook_tokens').doc(userId as string).set({
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresAt: Date.now() + (tokens.expires_in * 1000),
+        scope: tokens.scope,
+        email: profile.mail || profile.userPrincipalName,
+        displayName: profile.displayName,
+        updatedAt: new Date()
+      });
+
+      res.send(`<html><body style="font-family: system-ui; padding: 40px; text-align: center; background: #050505; color: white;">
+        <h2 style="color: #ec4899;">Outlook Connected!</h2>
+        <p>Connected as: ${profile.displayName} (${profile.mail || profile.userPrincipalName})</p>
+        <p>You can close this window.</p>
+        <script>setTimeout(() => window.close(), 2000);</script>
+      </body></html>`);
+    } catch (error: any) {
+      res.status(500).send(`Failed to connect Outlook: ${error.message}`);
+    }
+  });
+
+  // Helper: Get valid access token (refresh if expired)
+  async function getOutlookAccessToken(userId: string): Promise<string | null> {
+    try {
+      const tokenDoc = await db.collection('outlook_tokens').doc(userId).get();
+      if (!tokenDoc.exists) return null;
+
+      const tokenData = tokenDoc.data()!;
+
+      if (Date.now() > tokenData.expiresAt - 300000) {
+        // Refresh token
+        const refreshResponse = await fetch(`https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: OUTLOOK_CLIENT_ID!,
+            client_secret: OUTLOOK_CLIENT_SECRET!,
+            refresh_token: tokenData.refreshToken,
+            grant_type: 'refresh_token',
+            scope: OUTLOOK_SCOPES.join(' ')
+          }).toString()
+        });
+
+        const newTokens = await refreshResponse.json();
+        if (newTokens.error) return null;
+
+        await db.collection('outlook_tokens').doc(userId).update({
+          accessToken: newTokens.access_token,
+          refreshToken: newTokens.refresh_token || tokenData.refreshToken,
+          expiresAt: Date.now() + (newTokens.expires_in * 1000),
+          updatedAt: new Date()
+        });
+
+        return newTokens.access_token;
+      }
+
+      return tokenData.accessToken;
+    } catch {
+      return null;
+    }
+  }
+
+  // Outlook connection status
+  app.get("/api/outlook/status", async (req, res) => {
+    const userId = req.query.userId as string;
+    if (!userId) return res.json({ connected: false });
+
+    const token = await getOutlookAccessToken(userId);
+    let email: string | undefined;
+    if (token) {
+      try {
+        const tokenDoc = await db.collection('outlook_tokens').doc(userId).get();
+        email = tokenDoc.data()?.email;
+      } catch {}
+    }
+    res.json({
+      connected: !!token,
+      configured: !!(OUTLOOK_CLIENT_ID && OUTLOOK_CLIENT_SECRET),
+      email
+    });
+  });
+
+  // Disconnect Outlook
+  app.post("/api/outlook/disconnect", async (req, res) => {
+    const { userId } = req.body;
+    try {
+      await db.collection('outlook_tokens').doc(userId).delete();
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Helper: Parse Outlook email from Graph API
+  function parseOutlookEmail(msg: any): any {
+    return {
+      id: msg.id,
+      conversationId: msg.conversationId,
+      from: msg.from?.emailAddress?.address || '',
+      fromName: msg.from?.emailAddress?.name || '',
+      to: (msg.toRecipients || []).map((r: any) => r.emailAddress.address),
+      cc: (msg.ccRecipients || []).map((r: any) => r.emailAddress.address),
+      subject: msg.subject || '(No Subject)',
+      body: msg.body?.content || '',
+      bodyPreview: msg.bodyPreview || '',
+      receivedDateTime: msg.receivedDateTime,
+      isRead: msg.isRead,
+      hasAttachments: msg.hasAttachments || false,
+      importance: msg.importance || 'normal',
+      webLink: msg.webLink || ''
+    };
+  }
+
+  // Fetch inbox
+  app.get("/api/outlook/inbox", async (req, res) => {
+    const { userId, maxResults } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const top = parseInt((maxResults as string) || '20');
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=${top}&$orderby=receivedDateTime desc`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      const emails = (data.value || []).map(parseOutlookEmail);
+      res.json({ success: true, emails });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Get single email
+  app.get("/api/outlook/message/:id", async (req, res) => {
+    const { userId } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      res.json({ success: true, email: parseOutlookEmail(data) });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Send email
+  app.post("/api/outlook/send", async (req, res) => {
+    const { userId, to, cc, bcc, subject, body, isHtml, importance } = req.body;
+    const token = await getOutlookAccessToken(userId);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const message = {
+        subject,
+        body: {
+          contentType: isHtml === false ? 'Text' : 'HTML',
+          content: body
+        },
+        toRecipients: (Array.isArray(to) ? to : [to]).map((email: string) => ({
+          emailAddress: { address: email }
+        })),
+        ccRecipients: (cc || []).map((email: string) => ({
+          emailAddress: { address: email }
+        })),
+        bccRecipients: (bcc || []).map((email: string) => ({
+          emailAddress: { address: email }
+        })),
+        importance: importance || 'normal'
+      };
+
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ message, saveToSentItems: true })
+      });
+
+      if (response.status === 202) {
+        res.json({ success: true });
+      } else {
+        const data = await response.json();
+        res.status(400).json({ success: false, error: data.error?.message || "Send failed" });
+      }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Search emails
+  app.get("/api/outlook/search", async (req, res) => {
+    const { userId, q, maxResults } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const top = parseInt((maxResults as string) || '10');
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages?$search="${encodeURIComponent(q as string)}"&$top=${top}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      const emails = (data.value || []).map(parseOutlookEmail);
+      res.json({ success: true, emails });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Mark as read
+  app.post("/api/outlook/mark-read", async (req, res) => {
+    const { userId, emailId } = req.body;
+    const token = await getOutlookAccessToken(userId);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      await fetch(`https://graph.microsoft.com/v1.0/me/messages/${emailId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ isRead: true })
+      });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Unread count
+  app.get("/api/outlook/unread-count", async (req, res) => {
+    const { userId } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.json({ count: 0 });
+
+    try {
+      const response = await fetch(
+        'https://graph.microsoft.com/v1.0/me/mailFolders/inbox',
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      res.json({ count: data.unreadItemCount || 0 });
+    } catch {
+      res.json({ count: 0 });
+    }
+  });
+
+  // Get calendar events
+  app.get("/api/outlook/calendar/events", async (req, res) => {
+    const { userId, maxResults } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const top = parseInt((maxResults as string) || '10');
+      const startDateTime = new Date().toISOString();
+      const endDateTime = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${startDateTime}&endDateTime=${endDateTime}&$top=${top}&$orderby=start/dateTime`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+
+      const events = (data.value || []).map((e: any) => ({
+        id: e.id,
+        subject: e.subject || '(No Subject)',
+        bodyPreview: e.bodyPreview || '',
+        start: e.start?.dateTime,
+        end: e.end?.dateTime,
+        location: e.location?.displayName,
+        organizer: e.organizer?.emailAddress?.name,
+        attendees: (e.attendees || []).map((a: any) => ({
+          email: a.emailAddress.address,
+          name: a.emailAddress.name,
+          status: a.status?.response
+        })),
+        isOnlineMeeting: e.isOnlineMeeting || false,
+        onlineMeetingUrl: e.onlineMeeting?.joinUrl,
+        webLink: e.webLink
+      }));
+
+      res.json({ success: true, events });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Create calendar event
+  app.post("/api/outlook/calendar/create-event", async (req, res) => {
+    const { userId, subject, body, start, end, location, attendees } = req.body;
+    const token = await getOutlookAccessToken(userId);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const event: any = {
+        subject,
+        body: { contentType: 'HTML', content: body || '' },
+        start: { dateTime: start, timeZone: 'UTC' },
+        end: { dateTime: end, timeZone: 'UTC' },
+      };
+      if (location) event.location = { displayName: location };
+      if (attendees && attendees.length > 0) {
+        event.attendees = attendees.map((email: string) => ({
+          emailAddress: { address: email },
+          type: 'required'
+        }));
+      }
+
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/events', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(event)
+      });
+
+      const data = await response.json();
+      if (data.id) {
+        res.json({ success: true, eventId: data.id, webLink: data.webLink });
+      } else {
+        res.status(400).json({ success: false, error: data.error?.message || "Failed to create event" });
+      }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // Intelligence Engine API Proxy
   // This handles requests from the frontend that are routed through /api-proxy
   // It injects the real API_KEY from the server environment
