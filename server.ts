@@ -1356,6 +1356,421 @@ Answer concisely:` }] }]
     }
   }
 
+  // ============ Outlook (Microsoft Graph) Integration ============
+
+  const OUTLOOK_CLIENT_ID = process.env.OUTLOOK_CLIENT_ID;
+  const OUTLOOK_CLIENT_SECRET = process.env.OUTLOOK_CLIENT_SECRET;
+  const OUTLOOK_REDIRECT_URI = process.env.OUTLOOK_REDIRECT_URI || `http://localhost:${PORT}/api/outlook/callback`;
+  const OUTLOOK_TENANT = process.env.OUTLOOK_TENANT || 'common';
+
+  const OUTLOOK_SCOPES = [
+    'offline_access',
+    'User.Read',
+    'Mail.Read',
+    'Mail.Send',
+    'Mail.ReadWrite',
+    'Calendars.ReadWrite',
+  ];
+
+  // Get OAuth URL for Outlook connection
+  app.get("/api/outlook/auth-url", (req, res) => {
+    if (!OUTLOOK_CLIENT_ID || !OUTLOOK_CLIENT_SECRET) {
+      return res.status(503).json({
+        error: "Outlook integration not configured. Set OUTLOOK_CLIENT_ID and OUTLOOK_CLIENT_SECRET."
+      });
+    }
+
+    const userId = req.query.userId as string;
+    const params = new URLSearchParams({
+      client_id: OUTLOOK_CLIENT_ID,
+      response_type: 'code',
+      redirect_uri: OUTLOOK_REDIRECT_URI,
+      response_mode: 'query',
+      scope: OUTLOOK_SCOPES.join(' '),
+      state: userId,
+      prompt: 'consent'
+    });
+
+    res.json({
+      url: `https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/authorize?${params}`
+    });
+  });
+
+  // OAuth callback - exchanges code for tokens
+  app.get("/api/outlook/callback", async (req, res) => {
+    const { code, state: userId, error: oauthError, error_description } = req.query;
+
+    if (oauthError) {
+      return res.status(400).send(`<html><body><h2>Outlook OAuth Error</h2><p>${oauthError}: ${error_description}</p><script>setTimeout(() => window.close(), 5000);</script></body></html>`);
+    }
+    if (!code || !userId) {
+      return res.status(400).send("Missing authorization code or user ID");
+    }
+
+    try {
+      const tokenResponse = await fetch(`https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code: code as string,
+          client_id: OUTLOOK_CLIENT_ID!,
+          client_secret: OUTLOOK_CLIENT_SECRET!,
+          redirect_uri: OUTLOOK_REDIRECT_URI,
+          grant_type: 'authorization_code',
+          scope: OUTLOOK_SCOPES.join(' ')
+        }).toString()
+      });
+
+      const tokens = await tokenResponse.json();
+
+      if (tokens.error) {
+        return res.status(400).send(`OAuth Error: ${tokens.error_description}`);
+      }
+
+      // Fetch user profile to get email address
+      const profileResponse = await fetch('https://graph.microsoft.com/v1.0/me', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` }
+      });
+      const profile = await profileResponse.json();
+
+      // Store tokens
+      await db.collection('outlook_tokens').doc(userId as string).set({
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresAt: Date.now() + (tokens.expires_in * 1000),
+        scope: tokens.scope,
+        email: profile.mail || profile.userPrincipalName,
+        displayName: profile.displayName,
+        updatedAt: new Date()
+      });
+
+      res.send(`<html><body style="font-family: system-ui; padding: 40px; text-align: center; background: #050505; color: white;">
+        <h2 style="color: #ec4899;">Outlook Connected!</h2>
+        <p>Connected as: ${profile.displayName} (${profile.mail || profile.userPrincipalName})</p>
+        <p>You can close this window.</p>
+        <script>setTimeout(() => window.close(), 2000);</script>
+      </body></html>`);
+    } catch (error: any) {
+      res.status(500).send(`Failed to connect Outlook: ${error.message}`);
+    }
+  });
+
+  // Helper: Get valid access token (refresh if expired)
+  async function getOutlookAccessToken(userId: string): Promise<string | null> {
+    try {
+      const tokenDoc = await db.collection('outlook_tokens').doc(userId).get();
+      if (!tokenDoc.exists) return null;
+
+      const tokenData = tokenDoc.data()!;
+
+      if (Date.now() > tokenData.expiresAt - 300000) {
+        // Refresh token
+        const refreshResponse = await fetch(`https://login.microsoftonline.com/${OUTLOOK_TENANT}/oauth2/v2.0/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: OUTLOOK_CLIENT_ID!,
+            client_secret: OUTLOOK_CLIENT_SECRET!,
+            refresh_token: tokenData.refreshToken,
+            grant_type: 'refresh_token',
+            scope: OUTLOOK_SCOPES.join(' ')
+          }).toString()
+        });
+
+        const newTokens = await refreshResponse.json();
+        if (newTokens.error) return null;
+
+        await db.collection('outlook_tokens').doc(userId).update({
+          accessToken: newTokens.access_token,
+          refreshToken: newTokens.refresh_token || tokenData.refreshToken,
+          expiresAt: Date.now() + (newTokens.expires_in * 1000),
+          updatedAt: new Date()
+        });
+
+        return newTokens.access_token;
+      }
+
+      return tokenData.accessToken;
+    } catch {
+      return null;
+    }
+  }
+
+  // Outlook connection status
+  app.get("/api/outlook/status", async (req, res) => {
+    const userId = req.query.userId as string;
+    if (!userId) return res.json({ connected: false });
+
+    const token = await getOutlookAccessToken(userId);
+    let email: string | undefined;
+    if (token) {
+      try {
+        const tokenDoc = await db.collection('outlook_tokens').doc(userId).get();
+        email = tokenDoc.data()?.email;
+      } catch {}
+    }
+    res.json({
+      connected: !!token,
+      configured: !!(OUTLOOK_CLIENT_ID && OUTLOOK_CLIENT_SECRET),
+      email
+    });
+  });
+
+  // Disconnect Outlook
+  app.post("/api/outlook/disconnect", async (req, res) => {
+    const { userId } = req.body;
+    try {
+      await db.collection('outlook_tokens').doc(userId).delete();
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Helper: Parse Outlook email from Graph API
+  function parseOutlookEmail(msg: any): any {
+    return {
+      id: msg.id,
+      conversationId: msg.conversationId,
+      from: msg.from?.emailAddress?.address || '',
+      fromName: msg.from?.emailAddress?.name || '',
+      to: (msg.toRecipients || []).map((r: any) => r.emailAddress.address),
+      cc: (msg.ccRecipients || []).map((r: any) => r.emailAddress.address),
+      subject: msg.subject || '(No Subject)',
+      body: msg.body?.content || '',
+      bodyPreview: msg.bodyPreview || '',
+      receivedDateTime: msg.receivedDateTime,
+      isRead: msg.isRead,
+      hasAttachments: msg.hasAttachments || false,
+      importance: msg.importance || 'normal',
+      webLink: msg.webLink || ''
+    };
+  }
+
+  // Fetch inbox
+  app.get("/api/outlook/inbox", async (req, res) => {
+    const { userId, maxResults } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const top = parseInt((maxResults as string) || '20');
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=${top}&$orderby=receivedDateTime desc`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      const emails = (data.value || []).map(parseOutlookEmail);
+      res.json({ success: true, emails });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Get single email
+  app.get("/api/outlook/message/:id", async (req, res) => {
+    const { userId } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      res.json({ success: true, email: parseOutlookEmail(data) });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Send email
+  app.post("/api/outlook/send", async (req, res) => {
+    const { userId, to, cc, bcc, subject, body, isHtml, importance } = req.body;
+    const token = await getOutlookAccessToken(userId);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const message = {
+        subject,
+        body: {
+          contentType: isHtml === false ? 'Text' : 'HTML',
+          content: body
+        },
+        toRecipients: (Array.isArray(to) ? to : [to]).map((email: string) => ({
+          emailAddress: { address: email }
+        })),
+        ccRecipients: (cc || []).map((email: string) => ({
+          emailAddress: { address: email }
+        })),
+        bccRecipients: (bcc || []).map((email: string) => ({
+          emailAddress: { address: email }
+        })),
+        importance: importance || 'normal'
+      };
+
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ message, saveToSentItems: true })
+      });
+
+      if (response.status === 202) {
+        res.json({ success: true });
+      } else {
+        const data = await response.json();
+        res.status(400).json({ success: false, error: data.error?.message || "Send failed" });
+      }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Search emails
+  app.get("/api/outlook/search", async (req, res) => {
+    const { userId, q, maxResults } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const top = parseInt((maxResults as string) || '10');
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages?$search="${encodeURIComponent(q as string)}"&$top=${top}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      const emails = (data.value || []).map(parseOutlookEmail);
+      res.json({ success: true, emails });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Mark as read
+  app.post("/api/outlook/mark-read", async (req, res) => {
+    const { userId, emailId } = req.body;
+    const token = await getOutlookAccessToken(userId);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      await fetch(`https://graph.microsoft.com/v1.0/me/messages/${emailId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ isRead: true })
+      });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Unread count
+  app.get("/api/outlook/unread-count", async (req, res) => {
+    const { userId } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.json({ count: 0 });
+
+    try {
+      const response = await fetch(
+        'https://graph.microsoft.com/v1.0/me/mailFolders/inbox',
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+      res.json({ count: data.unreadItemCount || 0 });
+    } catch {
+      res.json({ count: 0 });
+    }
+  });
+
+  // Get calendar events
+  app.get("/api/outlook/calendar/events", async (req, res) => {
+    const { userId, maxResults } = req.query;
+    const token = await getOutlookAccessToken(userId as string);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const top = parseInt((maxResults as string) || '10');
+      const startDateTime = new Date().toISOString();
+      const endDateTime = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${startDateTime}&endDateTime=${endDateTime}&$top=${top}&$orderby=start/dateTime`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await response.json();
+
+      const events = (data.value || []).map((e: any) => ({
+        id: e.id,
+        subject: e.subject || '(No Subject)',
+        bodyPreview: e.bodyPreview || '',
+        start: e.start?.dateTime,
+        end: e.end?.dateTime,
+        location: e.location?.displayName,
+        organizer: e.organizer?.emailAddress?.name,
+        attendees: (e.attendees || []).map((a: any) => ({
+          email: a.emailAddress.address,
+          name: a.emailAddress.name,
+          status: a.status?.response
+        })),
+        isOnlineMeeting: e.isOnlineMeeting || false,
+        onlineMeetingUrl: e.onlineMeeting?.joinUrl,
+        webLink: e.webLink
+      }));
+
+      res.json({ success: true, events });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Create calendar event
+  app.post("/api/outlook/calendar/create-event", async (req, res) => {
+    const { userId, subject, body, start, end, location, attendees } = req.body;
+    const token = await getOutlookAccessToken(userId);
+    if (!token) return res.status(401).json({ success: false, error: "Outlook not connected" });
+
+    try {
+      const event: any = {
+        subject,
+        body: { contentType: 'HTML', content: body || '' },
+        start: { dateTime: start, timeZone: 'UTC' },
+        end: { dateTime: end, timeZone: 'UTC' },
+      };
+      if (location) event.location = { displayName: location };
+      if (attendees && attendees.length > 0) {
+        event.attendees = attendees.map((email: string) => ({
+          emailAddress: { address: email },
+          type: 'required'
+        }));
+      }
+
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/events', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(event)
+      });
+
+      const data = await response.json();
+      if (data.id) {
+        res.json({ success: true, eventId: data.id, webLink: data.webLink });
+      } else {
+        res.status(400).json({ success: false, error: data.error?.message || "Failed to create event" });
+      }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // Intelligence Engine API Proxy
   // This handles requests from the frontend that are routed through /api-proxy
   // It injects the real API_KEY from the server environment

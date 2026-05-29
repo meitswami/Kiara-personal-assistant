@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, MicOff, Power, Globe, Zap, Heart, Sparkles, Shield, X, Send, MessageSquare, Coins, Settings, Bell, Smartphone, Volume2, ChevronDown, ClosedCaption, Database, Search, Pin } from 'lucide-react';
+import { Mic, MicOff, Power, Globe, Zap, Heart, Sparkles, Shield, X, Send, MessageSquare, Coins, Settings, Bell, Smartphone, Volume2, ChevronDown, ClosedCaption, Database, Search, Pin, Plug } from 'lucide-react';
 import { AudioStreamer } from '../lib/audio-streamer';
 import { VideoStreamer } from '../lib/video-streamer';
 import { LiveSession, SessionState } from '../lib/live-session';
@@ -15,6 +15,7 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import { RegistrationForm } from './RegistrationForm';
 import { LoginForm } from './LoginForm';
 import { AdminPanel } from './AdminPanel';
+import { IntegrationsPanel } from './IntegrationsPanel';
 import { TalkingAvatar } from './TalkingAvatar';
 import { collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, getDocs, updateDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -52,6 +53,7 @@ export const KiaraUI: React.FC = () => {
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'none'>('none');
   const [showAdmin, setShowAdmin] = useState(false);
+  const [showIntegrations, setShowIntegrations] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ phone: string; transcript: string } | null>(null);
   const [analyzingCall, setAnalyzingCall] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
@@ -810,6 +812,13 @@ export const KiaraUI: React.FC = () => {
             {user ? (
             <div className="flex items-center gap-3">
               <button 
+                onClick={() => setShowIntegrations(true)}
+                className="p-2 rounded-lg bg-white/5 text-gray-400 hover:bg-white/10 transition-colors"
+                title="Integrations"
+              >
+                <Plug className="w-4 h-4" />
+              </button>
+              <button 
                 onClick={() => setShowSettings(true)}
                 className="p-2 rounded-lg bg-white/5 text-gray-400 hover:bg-white/10 transition-colors"
               >
@@ -883,6 +892,11 @@ export const KiaraUI: React.FC = () => {
       {/* Admin Panel */}
       <AnimatePresence>
         {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
+      </AnimatePresence>
+
+      {/* Integrations Panel */}
+      <AnimatePresence>
+        {showIntegrations && <IntegrationsPanel onClose={() => setShowIntegrations(false)} />}
       </AnimatePresence>
 
       {/* Settings Modal */}
